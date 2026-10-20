@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d14">
+  <title>Community Hub — Dashboard</title>
+  <style>
+    :root{--bg:#0b0d14;--panel:#121622;--panel2:#171c2b;--line:#272d40;--text:#f4f6ff;--muted:#9ba4bc;--accent:#8b5cf6;--accent2:#5b7cfa;--green:#35d49a;--yellow:#f6c76b;--red:#ff6d87}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 80% 0%,#20204a 0,transparent 36%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+    button,a{font:inherit}a{color:inherit;text-decoration:none}.app{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}
+    aside{padding:24px 16px;border-right:1px solid var(--line);background:#0d1019eF;display:flex;flex-direction:column;gap:24px}
+    .brand{display:flex;gap:12px;align-items:center;padding:0 8px}.logo{width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;font-weight:900;font-size:20px;box-shadow:0 8px 28px #7654ed45}
+    .brand strong{display:block;font-size:15px}.brand small,.muted{color:var(--muted)}.nav-label{font-size:11px;color:#727d99;text-transform:uppercase;letter-spacing:.14em;padding:0 12px;margin-bottom:8px}
+    nav{display:grid;gap:5px}.nav-item{border:0;background:transparent;color:var(--muted);text-align:left;padding:11px 12px;border-radius:11px;cursor:pointer;display:flex;align-items:center;gap:12px}.nav-item:hover,.nav-item.active{background:#24203b;color:#fff}.nav-item.active{box-shadow:inset 3px 0 var(--accent)}.nav-item span:first-child{width:22px;text-align:center}
+    .side-bottom{margin-top:auto;border:1px solid var(--line);background:var(--panel);border-radius:15px;padding:14px}.status-dot{display:inline-block;width:8px;height:8px;background:var(--green);border-radius:50%;margin-right:7px}
+    main{padding:30px clamp(18px,4vw,48px);min-width:0;max-width:1500px;width:100%;margin:auto}.topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:30px}.eyebrow{color:#b5a4ff;font-size:12px;text-transform:uppercase;letter-spacing:.12em;font-weight:800}.topbar h1{font-size:clamp(25px,3vw,34px);margin:5px 0 0;letter-spacing:-.04em}.actions{display:flex;gap:10px;align-items:center}.btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:10px 14px;border-radius:11px;cursor:pointer;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:8px}.btn:hover{filter:brightness(1.15);transform:translateY(-1px)}.btn.primary{background:linear-gradient(120deg,var(--accent),#6558df);border-color:transparent}.btn.join{background:#202d2c;border-color:#2a5749;color:#9af1d0}
+    .notice{padding:13px 15px;border:1px solid #4b3b77;background:#1b1730;border-radius:13px;color:#d9d0ff;margin-bottom:22px}.notice strong{color:#fff}
+    .grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px}.card{background:linear-gradient(150deg,#171c2b,#111520);border:1px solid var(--line);border-radius:17px;padding:19px;min-width:0}.stat-head{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:13px}.stat-icon{width:37px;height:37px;display:grid;place-items:center;border-radius:12px;background:#27213e;color:#c7b8ff;font-size:18px}.stat-value{font-size:29px;font-weight:850;letter-spacing:-.04em;margin:12px 0 2px}.stat-foot{font-size:12px;color:var(--muted)}.content-grid{grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr)}.card-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.card-title h2{font-size:16px;margin:0}.pill{font-size:11px;border-radius:999px;padding:5px 9px;background:#1e3a32;color:#8de8c4;font-weight:800}.bars{height:170px;display:flex;align-items:end;gap:clamp(6px,1.5vw,15px);padding:8px 2px 0;border-bottom:1px solid var(--line)}.bar-col{flex:1;display:flex;align-items:center;flex-direction:column;justify-content:end;height:100%;gap:8px;color:var(--muted);font-size:11px}.bar{width:min(32px,80%);min-height:8px;border-radius:7px 7px 2px 2px;background:linear-gradient(180deg,#a78bfa,#6558df);box-shadow:0 5px 20px #8b5cf620}.activity{display:grid;gap:15px}.event{display:flex;gap:12px;align-items:flex-start}.event-icon{width:36px;height:36px;flex-shrink:0;display:grid;place-items:center;border-radius:11px;background:#25213a}.event strong{font-size:13px;display:block}.event small{color:var(--muted);font-size:12px}.event time{display:block;color:#727d99;font-size:11px;margin-top:3px}
+    .section{display:none}.section.active{display:block}.settings{display:grid;gap:13px}.setting{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px;border:1px solid var(--line);border-radius:13px;background:#141927}.setting strong{display:block;font-size:14px}.setting small{display:block;color:var(--muted);margin-top:3px}.switch{appearance:none;width:44px;height:25px;background:#343a4e;border-radius:99px;position:relative;cursor:pointer;flex-shrink:0;transition:.2s}.switch:checked{background:#7556e8}.switch:before{content:"";position:absolute;width:19px;height:19px;background:white;border-radius:50%;top:3px;left:3px;transition:.2s}.switch:checked:before{left:22px}
+    .field{display:grid;gap:7px;margin-bottom:16px}.field label{font-size:13px;color:var(--muted)}input[type=text],select,textarea{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0d111c;color:var(--text);outline:none}input:focus,select:focus,textarea:focus{border-color:var(--accent)}textarea{min-height:95px;resize:vertical}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:480px}th,td{text-align:left;padding:13px 10px;border-bottom:1px solid var(--line);font-size:13px}th{color:var(--muted);font-weight:600}.tag{border-radius:7px;padding:4px 7px;background:#25203b;color:#cbbcff;font-size:11px}.empty{color:var(--muted);font-size:13px}.footer-note{margin-top:18px;color:#77819a;font-size:12px}
+    .mobile-menu{display:none}.toast{position:fixed;bottom:22px;right:22px;background:#20283a;border:1px solid #414b68;border-radius:12px;padding:12px 16px;box-shadow:0 12px 35px #0008;display:none;max-width:calc(100vw - 44px);z-index:10}
+    @media(max-width:1000px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.content-grid{grid-template-columns:1fr}}
+    @media(max-width:700px){.app{grid-template-columns:1fr}aside{position:fixed;z-index:8;inset:0 auto 0 0;width:260px;transform:translateX(-105%);transition:transform .2s;box-shadow:20px 0 50px #0007}aside.open{transform:translateX(0)}.mobile-menu{display:inline-flex}.topbar{align-items:flex-start}.topbar .actions{flex-wrap:wrap;justify-content:flex-end}.topbar h1{font-size:25px}.stats{gap:10px}.card{padding:15px}.stat-value{font-size:25px}main{padding:20px 14px}.actions .btn{padding:9px 10px;font-size:12px}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside id="sidebar">
+    <div class="brand"><div class="logo">CH</div><div><strong>Community Hub</strong><small>Server dashboard</small></div></div>
+    <div><div class="nav-label">Workspace</div><nav>
+      <button class="nav-item active" data-page="overview"><span>◫</span> Overview</button>
+      <button class="nav-item" data-page="bot"><span>🤖</span> Bot settings</button>
+      <button class="nav-item" data-page="moderation"><span>🛡</span> Moderation</button>
+      <button class="nav-item" data-page="events"><span>🎮</span> Gaming & events</button>
+      <button class="nav-item" data-page="logs"><span>☷</span> Activity logs</button>
+    </nav></div>
+    <div><div class="nav-label">Community</div><nav>
+      <a class="nav-item" href="https://discord.gg/GFWvFtdA7t" target="_blank" rel="noopener"><span>◉</span> Open Discord server ↗</a>
+      <button class="nav-item" data-page="website"><span>⌘</span> Website settings</button>
+    </nav></div>
+    <div class="side-bottom"><div style="font-weight:750;margin-bottom:7px">Server connection</div><div><span class="status-dot"></span><span id="connectionText">Demo interface</span></div><small class="muted">Belum terhubung ke bot/API</small></div>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div style="display:flex;align-items:flex-start;gap:12px"><button class="btn mobile-menu" id="menuBtn" aria-label="Buka menu">☰</button><div><div class="eyebrow">Community control center</div><h1 id="pageTitle">Dashboard overview</h1><div class="muted" style="margin-top:5px">Kelola komunitas gaming lu dari satu tempat.</div></div></div>
+      <div class="actions"><a class="btn join" href="https://discord.gg/GFWvFtdA7t" target="_blank" rel="noopener">↗ Join Discord</a><button class="btn" id="refreshBtn">⟳ Refresh demo</button></div>
+    </header>
+    <div class="notice"><strong>Mode preview:</strong> tampilan ini sudah interaktif, tetapi angka, log, dan pengaturan masih berupa data contoh di browser. Hubungkan backend dan bot untuk data nyata.</div>
+
+    <section class="section active" id="page-overview">
+      <div class="grid stats">
+        <div class="card"><div class="stat-head">Total members <span class="stat-icon">♟</span></div><div class="stat-value">2,481</div><div class="stat-foot">Contoh data • bukan angka live</div></div>
+        <div class="card"><div class="stat-head">Bot status <span class="stat-icon">⌁</span></div><div class="stat-value" style="font-size:25px;color:var(--yellow)">Demo</div><div class="stat-foot">Perlu integrasi API untuk status real-time</div></div>
+        <div class="card"><div class="stat-head">Events this month <span class="stat-icon">🎮</span></div><div class="stat-value">08</div><div class="stat-foot">Contoh event komunitas</div></div>
+        <div class="card"><div class="stat-head">Open tickets <span class="stat-icon">✉</span></div><div class="stat-value">12</div><div class="stat-foot">Contoh tiket support</div></div>
+      </div>
+      <div class="grid content-grid">
+        <div class="card"><div class="card-title"><h2>Community activity</h2><span class="pill">DEMO</span></div><div class="muted" style="font-size:12px">Aktivitas ilustratif selama 7 hari</div><div class="bars" aria-label="Grafik aktivitas demo">
+          <div class="bar-col"><div class="bar" style="height:35%"></div>Sen</div><div class="bar-col"><div class="bar" style="height:55%"></div>Sel</div><div class="bar-col"><div class="bar" style="height:44%"></div>Rab</div><div class="bar-col"><div class="bar" style="height:76%"></div>Kam</div><div class="bar-col"><div class="bar" style="height:62%"></div>Jum</div><div class="bar-col"><div class="bar" style="height:90%"></div>Sab</div><div class="bar-col"><div class="bar" style="height:68%"></div>Min</div>
+        </div><div class="footer-note">Grafik ini belum membaca data Discord.</div></div>
+        <div class="card"><div class="card-title"><h2>Recent activity</h2><span class="pill">SAMPLE</span></div><div class="activity">
+          <div class="event"><div class="event-icon">👋</div><div><strong>Welcome system</strong><small>Contoh: member baru bergabung</small><time>Beberapa menit lalu • demo</time></div></div>
+          <div class="event"><div class="event-icon">🛡</div><div><strong>Auto moderation</strong><small>Contoh: pesan spam ditandai</small><time>18 menit lalu • demo</time></div></div>
+          <div class="event"><div class="event-icon">🎮</div><div><strong>Gaming event</strong><small>Contoh: pendaftaran event dibuka</small><time>1 jam lalu • demo</time></div></div>
+        </div></div>
+      </div>
+    </section>
+
+    <section class="section" id="page-bot">
+      <div class="card"><div class="card-title"><h2>Bot configuration</h2><span class="tag">Local preview</span></div><div class="settings">
+        <div class="setting"><div><strong>Welcome message</strong><small>Aktifkan pesan sambutan member baru.</small></div><input class="switch persist" type="checkbox" checked aria-label="Welcome message"></div>
+        <div class="setting"><div><strong>Auto role</strong><small>Berikan role default melalui bot.</small></div><input class="switch persist" type="checkbox" checked aria-label="Auto role"></div>
+        <div class="setting"><div><strong>Leveling system</strong><small>XP dan level untuk aktivitas komunitas.</small></div><input class="switch persist" type="checkbox" aria-label="Leveling system"></div>
+        <div class="setting"><div><strong>Event announcements</strong><small>Pengumuman event gaming otomatis.</small></div><input class="switch persist" type="checkbox" checked aria-label="Event announcements"></div>
+      </div><div class="field" style="margin-top:20px"><label for="welcomeMsg">Template welcome message</label><textarea id="welcomeMsg" placeholder="Selamat datang {user} di server!">Selamat datang {user} di komunitas kami! Baca rules dan selamat bermain 🎮</textarea></div><button class="btn primary" id="saveBot">Simpan preview settings</button><p class="footer-note">Penyimpanan ini hanya untuk demo browser. Belum mengubah konfigurasi bot Discord.</p></div>
+    </section>
+
+    <section class="section" id="page-moderation">
+      <div class="card"><div class="card-title"><h2>Moderation controls</h2><span class="tag">Preview only</span></div><div class="settings">
+        <div class="setting"><div><strong>Anti-spam</strong><small>Deteksi pesan berulang atau terlalu cepat.</small></div><input class="switch persist" type="checkbox" checked aria-label="Anti spam"></div>
+        <div class="setting"><div><strong>Link filter</strong><small>Atur tautan yang diizinkan melalui backend bot.</small></div><input class="switch persist" type="checkbox" aria-label="Link filter"></div>
+        <div class="setting"><div><strong>Raid protection</strong><small>Deteksi lonjakan join yang tidak biasa.</small></div><input class="switch persist" type="checkbox" checked aria-label="Raid protection"></div>
+      </div><div class="field" style="margin-top:20px"><label for="logChannel">Nama channel log (contoh)</label><input type="text" id="logChannel" placeholder="#mod-logs"></div><button class="btn primary" id="saveMod">Simpan preview settings</button><p class="footer-note">Jangan gunakan kontrol ini untuk aksi moderasi nyata sebelum autentikasi admin dan audit log backend tersedia.</p></div>
+    </section>
+
+    <section class="section" id="page-events">
+      <div class="grid content-grid">
+        <div class="card"><div class="card-title"><h2>Buat event gaming</h2><span class="tag">Local preview</span></div><form id="eventForm">
+          <div class="field"><label for="eventName">Nama event</label><input id="eventName" type="text" required maxlength="80" placeholder="Contoh: Valorant custom night"></div>
+          <div class="field"><label for="gameName">Game</label><select id="gameName"><option>Valorant</option><option>Mobile Legends</option><option>Minecraft</option><option>Roblox</option><option>Other</option></select></div>
+          <div class="field"><label for="eventDate">Tanggal & waktu</label><input id="eventDate" type="datetime-local" required></div>
+          <button class="btn primary" type="submit">＋ Tambahkan event</button>
+        </form></div>
+        <div class="card"><div class="card-title"><h2>Upcoming events</h2><span class="pill" id="eventCount">0 events</span></div><div id="eventList" class="activity"><p class="empty">Belum ada event yang ditambahkan di preview ini.</p></div></div>
+      </div>
+    </section>
+
+    <section class="section" id="page-logs">
+      <div class="card"><div class="card-title"><h2>Activity logs</h2><button class="btn" id="clearLogs">Bersihkan demo logs</button></div><div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Aktivitas</th><th>Sumber</th><th>Status</th></tr></thead><tbody id="logRows"><tr><td>08:30</td><td>Dashboard dibuka</td><td>Web preview</td><td><span class="tag">DEMO</span></td></tr><tr><td>08:25</td><td>Bot configuration dimuat</td><td>Local UI</td><td><span class="tag">DEMO</span></td></tr><tr><td>08:10</td><td>Contoh event dibuat</td><td>Sample data</td><td><span class="tag">DEMO</span></td></tr></tbody></table></div><p class="footer-note">Log ini bukan audit log Discord yang sebenarnya.</p></div>
+    </section>
+
+    <section class="section" id="page-website">
+      <div class="card"><div class="card-title"><h2>Website settings</h2></div>
+        <div class="field"><label for="serverName">Nama komunitas</label><input id="serverName" type="text" value="Community Hub" maxlength="60"></div>
+        <div class="field"><label for="serverDesc">Deskripsi singkat</label><textarea id="serverDesc">Tempat berkumpul, mencari party, dan ikut event gaming bareng komunitas.</textarea></div>
+        <div class="field"><label>Invite Discord</label><input type="text" value="https://discord.gg/GFWvFtdA7t" readonly></div>
+        <button class="btn primary" id="saveWebsite">Simpan preview website</button><p class="footer-note">Nilai ini hanya tersimpan sementara di browser demo. Ubah konfigurasi produksi di backend nantinya.</p>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+  const titles={overview:"Dashboard overview",bot:"Bot settings",moderation:"Moderation",events:"Gaming & events",logs:"Activity logs",website:"Website settings"};
+  const toastEl=document.getElementById('toast');let toastTimer;
+  function toast(msg){toastEl.textContent=msg;toastEl.style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>toastEl.style.display='none',2600)}
+  document.querySelectorAll('[data-page]').forEach(btn=>btn.addEventListener('click',()=>{const page=btn.dataset.page;document.querySelectorAll('.section').forEach(s=>s.classList.toggle('active',s.id==='page-'+page));document.querySelectorAll('.nav-item[data-page]').forEach(n=>n.classList.toggle('active',n===btn));document.getElementById('pageTitle').textContent=titles[page]||'Dashboard';document.getElementById('sidebar').classList.remove('open');}));
+  document.getElementById('menuBtn').addEventListener('click',()=>document.getElementById('sidebar').classList.toggle('open'));
+  document.getElementById('refreshBtn').addEventListener('click',()=>toast('Preview diperbarui. Data masih demo.'));
+  document.getElementById('saveBot').addEventListener('click',()=>toast('Pengaturan preview disimpan selama halaman ini terbuka.'));
+  document.getElementById('saveMod').addEventListener('click',()=>toast('Pengaturan moderasi preview disimpan.'));
+  document.getElementById('saveWebsite').addEventListener('click',()=>{const name=document.getElementById('serverName').value.trim();if(name)document.querySelector('.brand strong').textContent=name;toast('Tampilan preview diperbarui.')});
+  const events=[];const list=document.getElementById('eventList');
+  document.getElementById('eventForm').addEventListener('submit',e=>{e.preventDefault();const name=document.getElementById('eventName').value.trim();const game=document.getElementById('gameName').value;const date=document.getElementById('eventDate').value;if(!name||!date)return;events.push({name,game,date});renderEvents();e.target.reset();toast('Event ditambahkan ke preview.')});
+  function renderEvents(){document.getElementById('eventCount').textContent=events.length+' event';list.replaceChildren();if(!events.length){const p=document.createElement('p');p.className='empty';p.textContent='Belum ada event yang ditambahkan di preview ini.';list.append(p);return}events.forEach(ev=>{const row=document.createElement('div');row.className='event';const ico=document.createElement('div');ico.className='event-icon';ico.textContent='🎮';const body=document.createElement('div');const title=document.createElement('strong');title.textContent=ev.name;const sub=document.createElement('small');sub.textContent=ev.game;const time=document.createElement('time');time.textContent=new Date(ev.date).toLocaleString('id-ID');body.append(title,sub,time);row.append(ico,body);list.append(row)})}
+  document.getElementById('clearLogs').addEventListener('click',()=>{document.getElementById('logRows').replaceChildren();toast('Demo logs dibersihkan.')});
+</script>
+</body>
+</html>
