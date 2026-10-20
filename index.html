@@ -39,26 +39,26 @@
       <a class="nav-item" href="https://discord.gg/GFWvFtdA7t" target="_blank" rel="noopener"><span>◉</span> Open Discord server ↗</a>
       <button class="nav-item" data-page="website"><span>⌘</span> Website settings</button>
     </nav></div>
-    <div class="side-bottom"><div style="font-weight:750;margin-bottom:7px">Server connection</div><div><span class="status-dot"></span><span id="connectionText">Demo interface</span></div><small class="muted">Belum terhubung ke bot/API</small></div>
+    <div class="side-bottom"><div style="font-weight:750;margin-bottom:7px">Server connection</div><div><span class="status-dot" id="connectionDot"></span><span id="connectionText">Menghubungkan API…</span></div><small class="muted">Data publik dari Discord Widget</small></div>
   </aside>
   <main>
     <header class="topbar">
       <div style="display:flex;align-items:flex-start;gap:12px"><button class="btn mobile-menu" id="menuBtn" aria-label="Buka menu">☰</button><div><div class="eyebrow">Community control center</div><h1 id="pageTitle">Dashboard overview</h1><div class="muted" style="margin-top:5px">Kelola komunitas gaming lu dari satu tempat.</div></div></div>
-      <div class="actions"><a class="btn join" href="https://discord.gg/GFWvFtdA7t" target="_blank" rel="noopener">↗ Join Discord</a><button class="btn" id="refreshBtn">⟳ Refresh demo</button></div>
+      <div class="actions"><a class="btn join" href="https://discord.gg/GFWvFtdA7t" target="_blank" rel="noopener">↗ Join Discord</a><button class="btn" id="refreshBtn">⟳ Refresh stats</button></div>
     </header>
-    <div class="notice"><strong>Mode preview:</strong> tampilan ini sudah interaktif, tetapi angka, log, dan pengaturan masih berupa data contoh di browser. Hubungkan backend dan bot untuk data nyata.</div>
+    <div class="notice"><strong>Info:</strong> statistik member online diambil dari API Discord. Bagian event, aktivitas, tiket, dan pengaturan bot masih berupa preview dan belum terhubung ke BDFD.</div>
 
     <section class="section active" id="page-overview">
       <div class="grid stats">
-        <div class="card"><div class="stat-head">Total members <span class="stat-icon">♟</span></div><div class="stat-value">2,481</div><div class="stat-foot">Contoh data • bukan angka live</div></div>
-        <div class="card"><div class="stat-head">Bot status <span class="stat-icon">⌁</span></div><div class="stat-value" style="font-size:25px;color:var(--yellow)">Demo</div><div class="stat-foot">Perlu integrasi API untuk status real-time</div></div>
+        <div class="card"><div class="stat-head">Members online <span class="stat-icon">♟</span></div><div class="stat-value" id="onlineCount">--</div><div class="stat-foot" id="onlineFoot">Memuat data Discord…</div></div>
+        <div class="card"><div class="stat-head">Bot status <span class="stat-icon">⌁</span></div><div class="stat-value" id="botStatus" style="font-size:25px;color:var(--yellow)">Belum dicek</div><div class="stat-foot" id="botStatusFoot">Status BDFD perlu pemantauan terpisah</div></div>
         <div class="card"><div class="stat-head">Events this month <span class="stat-icon">🎮</span></div><div class="stat-value">08</div><div class="stat-foot">Contoh event komunitas</div></div>
         <div class="card"><div class="stat-head">Open tickets <span class="stat-icon">✉</span></div><div class="stat-value">12</div><div class="stat-foot">Contoh tiket support</div></div>
       </div>
       <div class="grid content-grid">
-        <div class="card"><div class="card-title"><h2>Community activity</h2><span class="pill">DEMO</span></div><div class="muted" style="font-size:12px">Aktivitas ilustratif selama 7 hari</div><div class="bars" aria-label="Grafik aktivitas demo">
+        <div class="card"><div class="card-title"><h2>Community activity</h2><span class="pill">DEMO</span></div><div class="muted" style="font-size:12px">Aktivitas ilustratif selama 7 hari</div><div class="bars" aria-label="Grafik aktivitas contoh">
           <div class="bar-col"><div class="bar" style="height:35%"></div>Sen</div><div class="bar-col"><div class="bar" style="height:55%"></div>Sel</div><div class="bar-col"><div class="bar" style="height:44%"></div>Rab</div><div class="bar-col"><div class="bar" style="height:76%"></div>Kam</div><div class="bar-col"><div class="bar" style="height:62%"></div>Jum</div><div class="bar-col"><div class="bar" style="height:90%"></div>Sab</div><div class="bar-col"><div class="bar" style="height:68%"></div>Min</div>
-        </div><div class="footer-note">Grafik ini belum membaca data Discord.</div></div>
+        </div><div class="footer-note">Grafik aktivitas masih contoh, belum membaca riwayat Discord.</div></div>
         <div class="card"><div class="card-title"><h2>Recent activity</h2><span class="pill">SAMPLE</span></div><div class="activity">
           <div class="event"><div class="event-icon">👋</div><div><strong>Welcome system</strong><small>Contoh: member baru bergabung</small><time>Beberapa menit lalu • demo</time></div></div>
           <div class="event"><div class="event-icon">🛡</div><div><strong>Auto moderation</strong><small>Contoh: pesan spam ditandai</small><time>18 menit lalu • demo</time></div></div>
@@ -117,7 +117,7 @@
   function toast(msg){toastEl.textContent=msg;toastEl.style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>toastEl.style.display='none',2600)}
   document.querySelectorAll('[data-page]').forEach(btn=>btn.addEventListener('click',()=>{const page=btn.dataset.page;document.querySelectorAll('.section').forEach(s=>s.classList.toggle('active',s.id==='page-'+page));document.querySelectorAll('.nav-item[data-page]').forEach(n=>n.classList.toggle('active',n===btn));document.getElementById('pageTitle').textContent=titles[page]||'Dashboard';document.getElementById('sidebar').classList.remove('open');}));
   document.getElementById('menuBtn').addEventListener('click',()=>document.getElementById('sidebar').classList.toggle('open'));
-  document.getElementById('refreshBtn').addEventListener('click',()=>toast('Preview diperbarui. Data masih demo.'));
+  document.getElementById('refreshBtn').addEventListener('click',()=>{updateDiscordStats();toast('Memuat ulang statistik Discord…')});
   document.getElementById('saveBot').addEventListener('click',()=>toast('Pengaturan preview disimpan selama halaman ini terbuka.'));
   document.getElementById('saveMod').addEventListener('click',()=>toast('Pengaturan moderasi preview disimpan.'));
   document.getElementById('saveWebsite').addEventListener('click',()=>{const name=document.getElementById('serverName').value.trim();if(name)document.querySelector('.brand strong').textContent=name;toast('Tampilan preview diperbarui.')});
@@ -125,6 +125,33 @@
   document.getElementById('eventForm').addEventListener('submit',e=>{e.preventDefault();const name=document.getElementById('eventName').value.trim();const game=document.getElementById('gameName').value;const date=document.getElementById('eventDate').value;if(!name||!date)return;events.push({name,game,date});renderEvents();e.target.reset();toast('Event ditambahkan ke preview.')});
   function renderEvents(){document.getElementById('eventCount').textContent=events.length+' event';list.replaceChildren();if(!events.length){const p=document.createElement('p');p.className='empty';p.textContent='Belum ada event yang ditambahkan di preview ini.';list.append(p);return}events.forEach(ev=>{const row=document.createElement('div');row.className='event';const ico=document.createElement('div');ico.className='event-icon';ico.textContent='🎮';const body=document.createElement('div');const title=document.createElement('strong');title.textContent=ev.name;const sub=document.createElement('small');sub.textContent=ev.game;const time=document.createElement('time');time.textContent=new Date(ev.date).toLocaleString('id-ID');body.append(title,sub,time);row.append(ico,body);list.append(row)})}
   document.getElementById('clearLogs').addEventListener('click',()=>{document.getElementById('logRows').replaceChildren();toast('Demo logs dibersihkan.')});
+
+  // Statistik publik dari Cloudflare Worker milikmu.
+  const STATS_API = "https://odd-tree-fdd3.ayhoobusiness.workers.dev/stats";
+  async function updateDiscordStats() {
+    const online = document.getElementById("onlineCount");
+    const foot = document.getElementById("onlineFoot");
+    const connection = document.getElementById("connectionText");
+    const dot = document.getElementById("connectionDot");
+    try {
+      const response = await fetch(STATS_API, { cache: "no-store" });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const data = await response.json();
+      if (typeof data.members_online !== "number") throw new Error("Data online tidak tersedia");
+      online.textContent = data.members_online.toLocaleString("id-ID");
+      foot.textContent = "Data live dari Discord Widget • " +
+        (data.updated_at ? new Date(data.updated_at).toLocaleTimeString("id-ID") : "baru diperbarui");
+      connection.textContent = "API terhubung";
+      dot.style.background = "var(--green)";
+    } catch (error) {
+      online.textContent = "--";
+      foot.textContent = "Gagal memuat statistik. Coba tekan Refresh stats.";
+      connection.textContent = "API tidak terhubung";
+      dot.style.background = "var(--red)";
+    }
+  }
+  updateDiscordStats();
+  setInterval(updateDiscordStats, 60000);
 </script>
 </body>
 </html>
