@@ -21,9 +21,6 @@ TZ_OFFSET = float(os.getenv("TZ_OFFSET_HOURS", "7"))  # a new "day" starts at mi
 # ---------- Settings (tweak freely) ----------
 ORANGE = 0xFF9500
 RED = 0xE5484D
-GOLD = 0xFFC53D
-# Streak milestones: days -> bonus cookies (edit freely, or empty the dict to disable bonuses)
-MILESTONES = {3: 25, 7: 75, 14: 150, 30: 400, 50: 700, 100: 1500, 200: 3000, 365: 5000}
 FOOTER = "Orage • Chat, level up, collect cookies"
 XP_MIN, XP_MAX = 15, 25
 XP_COOLDOWN = 30
@@ -243,48 +240,8 @@ async def give_level_roles(member: discord.Member, level: int) -> list[discord.R
     return given
 
 
-def milestone_progress(n: int) -> tuple[int, int | None]:
-    """(previous milestone, next milestone or None)."""
-    ms = sorted(MILESTONES)
-    prev = max([m for m in ms if m <= n], default=0)
-    nxt = next((m for m in ms if m > n), None)
-    return prev, nxt
-
-
-def week_row(last_day: int, n: int) -> str:
-    """Last 7 days: 🔥 chatted, ⏳ today still open, ⬛ missed."""
-    d = today()
-    active = set(range(last_day - n + 1, last_day + 1)) if n and last_day >= d - 1 else set()
-    cells = []
-    for day in range(d - 6, d + 1):
-        if day in active:
-            cells.append("🔥")
-        elif day == d and active:
-            cells.append("⏳")
-        else:
-            cells.append("⬛")
-    return "".join(cells)
-
-
-def next_reward_line(n: int) -> str:
-    prev, nxt = milestone_progress(n)
-    if nxt is None:
-        return "👑 You've reached every milestone!"
-    return f"{bar(n - prev, nxt - prev, 7)}  **{n}/{nxt}** days · +{MILESTONES[nxt]:,} 🍪"
-
-
-def streak_announce_embed(member: discord.Member, n: int, best: int, bonus: int) -> discord.Embed:
-    milestone = n in MILESTONES
-    e = base(color=GOLD if milestone else ORANGE)
-    if milestone:
-        e.title = f"🎉  {n}-day streak!"
-    lines = [f"{member.mention} streaks **{n}** 🔥", week_row(today(), n)]
-    if bonus:
-        lines.append(f"🎁 Milestone bonus: **+{bonus:,}** 🍪")
-    else:
-        lines.append(next_reward_line(n))
-    lines.append(f"-# Best: {best} · Chat again tomorrow to keep it going")
-    e.description = "\n".join(lines)
+def streak_announce_embed(member: discord.Member, n: int, best: int) -> discord.Embed:
+    e = base(desc=f"{member.mention} streaks **{n}** 🔥\n-# Best: {best}")
     e.set_thumbnail(url=member.display_avatar.url)
     return e
 
@@ -295,7 +252,6 @@ async def handle_streak(msg: discord.Message):
     if streak_seen.get((gid, uid)) == d:
         return
     streak_seen[(gid, uid)] = d
-    bonus = 0
     with db:
         r = db.execute("SELECT last_day, streak, best FROM streaks WHERE guild_id=? AND user_id=?",
                        (gid, uid)).fetchone()
@@ -306,12 +262,7 @@ async def handle_streak(msg: discord.Message):
         db.execute("INSERT INTO streaks VALUES(?, ?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET "
                    "last_day=excluded.last_day, streak=excluded.streak, best=excluded.best",
                    (gid, uid, d, n, best))
-        bonus = MILESTONES.get(n, 0)
-        if bonus:
-            get_user(gid, uid)
-            db.execute("UPDATE users SET cookies = cookies + ? WHERE guild_id=? AND user_id=?",
-                       (bonus, gid, uid))
-    await post_to(msg.guild, "streak", msg.channel, embed=streak_announce_embed(msg.author, n, best, bonus),
+    await post_to(msg.guild, "streak", msg.channel, embed=streak_announce_embed(msg.author, n, best),
                   allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -395,15 +346,13 @@ HELP_PAGES = {
                   "`/leaderboard`\nTop members by level, cookies or streak.\n\n"
                   "`/daily`\nClaim your daily cookies. A longer streak means a bigger reward.\n\n"
                   "`/givecookies` `member` `amount`\nShare your cookies with someone.")]),
-    "streaks": ("🔥  Streaks",
-                "Send **at least one message each day** to grow your streak.",
-                [("Commands", "`/streak` `[member]`\nSee a streak card with your week and next reward."),
+    "streaks": ("🔥  Streaks", "Send **at least one message each day** to grow your streak.",
+                [("Commands", "`/streak` `[member]`\nSee your streak and best streak."),
                  ("How it works",
                   "• First message of the day → Orage posts `@you streaks 5 🔥`\n"
                   "• Miss a full day → the streak resets\n"
                   f"• A new day starts at midnight (UTC{TZ_OFFSET:+g})\n"
-                  "• Hit milestones to earn bonus 🍪: " + " · ".join(f"{m}d" for m in sorted(MILESTONES)) + "\n"
-                  "• A longer streak also boosts `/daily`")]),
+                  "• A longer streak boosts `/daily`")]),
     "ngl": ("📨  Anonymous Messages", "Say it without saying who you are.",
             [("Commands",
               "`/ngl` `member` `message`\nSend an anonymous message. They can reply with a button.\n\n"
@@ -411,7 +360,7 @@ HELP_PAGES = {
              ("Good to know", "Be kind. Admins can trace abuse.")]),
     "shop": ("🛍️  Role Shop", "Spend your cookies on exclusive roles.",
              [("Commands", "`/shop`\nBrowse the roles and buy one with 🍪 cookies."),
-              ("Earn cookies", "Level up by chatting · `/daily` · streak milestones · `/givecookies` from friends")]),
+              ("Earn cookies", "Level up by chatting · `/daily` · `/givecookies` from friends")]),
     "fun": ("🎲  Fun", "Light and silly.",
             [("Commands", "`/8ball` `question`\n`/choose` `options`\n`/hug` `member`\n"
                           "`/ship` `member` `[member]`\n`/meow`")]),
@@ -493,38 +442,18 @@ async def profile(i: discord.Interaction, member: discord.Member | None = None):
     await i.response.send_message(embed=e)
 
 
-@bot.tree.command(name="streak", description="See a streak card")
+@bot.tree.command(name="streak", description="See your streak and best streak")
 @app_commands.guild_only()
 async def streak_cmd(i: discord.Interaction, member: discord.Member | None = None):
     member = member or i.user
     if member.bot:
         return await fail(i, "Bots don't keep streaks 🤖")
-    d = today()
-    r = db.execute("SELECT last_day, streak, best FROM streaks WHERE guild_id=? AND user_id=?",
-                   (i.guild.id, member.id)).fetchone()
-    last = r["last_day"] if r else 0
     n, best = get_streak(i.guild.id, member.id)
-    counted = bool(r) and last == d
-
     e = base()
     e.set_author(name=f"{member.display_name}'s streak", icon_url=member.display_avatar.url)
     e.set_thumbnail(url=member.display_avatar.url)
-    if n:
-        e.description = f"## 🔥 {n}-day streak"
-    else:
-        e.description = "## No streak yet\nSend a message to light the first flame ✨"
-    e.add_field(name="📅 Last 7 days", value=week_row(last, n), inline=False)
-    e.add_field(name="🎯 Next reward", value=next_reward_line(n), inline=False)
-    if counted:
-        status = "✅ Counted today"
-    elif n:
-        status = f"⏳ Chat before <t:{next_day_ts()}:R> to keep it"
-    else:
-        status = "💤 Chat today to start"
-    e.add_field(name="Status", value=status, inline=True)
+    e.add_field(name="🔥 Streak", value=f"**{n}** day{'s' if n != 1 else ''}", inline=True)
     e.add_field(name="🏆 Best", value=f"**{best}** day{'s' if best != 1 else ''}", inline=True)
-    ladder = "  ".join(f"{'✅' if best >= m else '🔒'}{m}d" for m in sorted(MILESTONES))
-    e.add_field(name="🎁 Milestones", value=ladder, inline=False)
     await i.response.send_message(embed=e)
 
 
