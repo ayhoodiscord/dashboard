@@ -5,9 +5,12 @@ import re
 import sqlite3
 import time
 
+import asyncio
+import hashlib
+
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +21,9 @@ TZ_OFFSET = float(os.getenv("TZ_OFFSET_HOURS", "7"))  # a new "day" starts at mi
 # ---------- Settings (tweak freely) ----------
 ORANGE = 0xFF9500
 RED = 0xE5484D
+GOLD = 0xFFC53D
+# Streak milestones: days -> bonus cookies (edit freely, or empty the dict to disable bonuses)
+MILESTONES = {3: 25, 7: 75, 14: 150, 30: 400, 50: 700, 100: 1500, 200: 3000, 365: 5000}
 FOOTER = "Orage • Chat, level up, collect cookies"
 XP_MIN, XP_MAX = 15, 25
 XP_COOLDOWN = 30
@@ -78,12 +84,39 @@ with db:
         PRIMARY KEY(guild_id, user_id));
     CREATE TABLE IF NOT EXISTS daily_claims(
         guild_id INTEGER, user_id INTEGER, last_day INTEGER, PRIMARY KEY(guild_id, user_id));
+    CREATE TABLE IF NOT EXISTS shop_items(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, kind TEXT, name TEXT,
+        description TEXT, price INTEGER, role_id INTEGER DEFAULT 0, value INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS shop_seeded(guild_id INTEGER PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS user_items(
+        guild_id INTEGER, user_id INTEGER, freezes INTEGER DEFAULT 0, PRIMARY KEY(guild_id, user_id));
+    CREATE TABLE IF NOT EXISTS boosts(
+        guild_id INTEGER, user_id INTEGER, until INTEGER, mult INTEGER, PRIMARY KEY(guild_id, user_id));
+    CREATE TABLE IF NOT EXISTS ticket_config(
+        guild_id INTEGER PRIMARY KEY, staff_role_id INTEGER, category_id INTEGER);
+    CREATE TABLE IF NOT EXISTS tickets(
+        channel_id INTEGER PRIMARY KEY, guild_id INTEGER, user_id INTEGER, created INTEGER);
+    CREATE TABLE IF NOT EXISTS reminders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id INTEGER,
+        due INTEGER, text TEXT);
+    CREATE TABLE IF NOT EXISTS afk(
+        guild_id INTEGER, user_id INTEGER, reason TEXT, since INTEGER,
+        PRIMARY KEY(guild_id, user_id));
     CREATE TABLE IF NOT EXISTS ngl_optout(
         guild_id INTEGER, user_id INTEGER, PRIMARY KEY(guild_id, user_id));
     CREATE TABLE IF NOT EXISTS ngl_log(
         message_id INTEGER PRIMARY KEY, guild_id INTEGER,
         sender_id INTEGER, target_id INTEGER, created INTEGER);
     """)
+
+
+for _col in ("claimed_by INTEGER", "kind TEXT"):
+    try:
+        db.execute(f"ALTER TABLE tickets ADD COLUMN {_col}")
+    except sqlite3.OperationalError:
+        pass
+
+afk_users = {(r["guild_id"], r["user_id"]) for r in db.execute("SELECT guild_id, user_id FROM afk")}
 
 
 def get_user(gid: int, uid: int) -> sqlite3.Row:
@@ -182,7 +215,10 @@ async def post_to(guild: discord.Guild, kind: str, fallback, **kwargs):
 # ---------- Events ----------
 @bot.event
 async def setup_hook():
-    bot.add_dynamic_items(NGLReply)
+    bot.add_dynamic_items(NGLReply, SelfRoleButton, SelfRoleMine)
+    reminder_loop.start()
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketControlView())
     await bot.tree.sync()
 
 
@@ -207,12 +243,59 @@ async def give_level_roles(member: discord.Member, level: int) -> list[discord.R
     return given
 
 
+def milestone_progress(n: int) -> tuple[int, int | None]:
+    """(previous milestone, next milestone or None)."""
+    ms = sorted(MILESTONES)
+    prev = max([m for m in ms if m <= n], default=0)
+    nxt = next((m for m in ms if m > n), None)
+    return prev, nxt
+
+
+def week_row(last_day: int, n: int) -> str:
+    """Last 7 days: 🔥 chatted, ⏳ today still open, ⬛ missed."""
+    d = today()
+    active = set(range(last_day - n + 1, last_day + 1)) if n and last_day >= d - 1 else set()
+    cells = []
+    for day in range(d - 6, d + 1):
+        if day in active:
+            cells.append("🔥")
+        elif day == d and active:
+            cells.append("⏳")
+        else:
+            cells.append("⬛")
+    return "".join(cells)
+
+
+def next_reward_line(n: int) -> str:
+    prev, nxt = milestone_progress(n)
+    if nxt is None:
+        return "👑 You've reached every milestone!"
+    return f"{bar(n - prev, nxt - prev, 7)}  **{n}/{nxt}** days · +{MILESTONES[nxt]:,} 🍪"
+
+
+def streak_announce_embed(member: discord.Member, n: int, best: int, bonus: int) -> discord.Embed:
+    milestone = n in MILESTONES
+    e = base(color=GOLD if milestone else ORANGE)
+    if milestone:
+        e.title = f"🎉  {n}-day streak!"
+    lines = [f"{member.mention} streaks **{n}** 🔥", week_row(today(), n)]
+    if bonus:
+        lines.append(f"🎁 Milestone bonus: **+{bonus:,}** 🍪")
+    else:
+        lines.append(next_reward_line(n))
+    lines.append(f"-# Best: {best} · Chat again tomorrow to keep it going")
+    e.description = "\n".join(lines)
+    e.set_thumbnail(url=member.display_avatar.url)
+    return e
+
+
 async def handle_streak(msg: discord.Message):
-    """One message per day = one streak day."""
+    """One message per day = one streak day. Miss a day and it resets."""
     gid, uid, d = msg.guild.id, msg.author.id, today()
     if streak_seen.get((gid, uid)) == d:
         return
     streak_seen[(gid, uid)] = d
+    bonus = 0
     with db:
         r = db.execute("SELECT last_day, streak, best FROM streaks WHERE guild_id=? AND user_id=?",
                        (gid, uid)).fetchone()
@@ -223,7 +306,12 @@ async def handle_streak(msg: discord.Message):
         db.execute("INSERT INTO streaks VALUES(?, ?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET "
                    "last_day=excluded.last_day, streak=excluded.streak, best=excluded.best",
                    (gid, uid, d, n, best))
-    await post_to(msg.guild, "streak", msg.channel, content=f"{msg.author.mention} streaks {n} 🔥",
+        bonus = MILESTONES.get(n, 0)
+        if bonus:
+            get_user(gid, uid)
+            db.execute("UPDATE users SET cookies = cookies + ? WHERE guild_id=? AND user_id=?",
+                       (bonus, gid, uid))
+    await post_to(msg.guild, "streak", msg.channel, embed=streak_announce_embed(msg.author, n, best, bonus),
                   allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -231,6 +319,7 @@ async def handle_streak(msg: discord.Message):
 async def on_message(msg: discord.Message):
     if msg.author.bot or not msg.guild:
         return
+    await handle_afk(msg)
     await handle_streak(msg)
 
     key = (msg.guild.id, msg.author.id)
@@ -263,7 +352,7 @@ async def on_message(msg: discord.Message):
 
 
 def welcome_embed(member: discord.Member) -> discord.Embed:
-    e = discord.Embed(title="👋 Welcome to Orage!!", color=ORANGE, description=(
+    e = discord.Embed(title="👋 Welcome to Ayhoo!!", color=ORANGE, description=(
         f"Hey {member.mention}, you made it! 🧡\n\n"
         "We're really happy to have you here. Grab a seat, say hi, and make yourself at home."))
     e.add_field(name="🌟 Where to start", value=WHERE_TO_START, inline=False)
@@ -299,7 +388,7 @@ HELP_PAGES = {
              [("✨ How it works",
                "Send messages → earn XP\nLevel up → earn 🍪 cookies & roles\nChat once a day → keep your 🔥 streak"),
               ("🚀 Quick start",
-               "`/profile` see your card\n`/daily` claim free cookies\n`/leaderboard` see the top members")]),
+               "`/profile` see your card\n`/daily` claim free cookies\n`/shop` spend your cookies\n`/leaderboard` see the top members")]),
     "cookies": ("🍪  Cookies & Levels", "Everything about your progress.",
                 [("Commands",
                   "`/profile` `[member]`\nView a profile card.\n\n"
@@ -308,21 +397,38 @@ HELP_PAGES = {
                   "`/givecookies` `member` `amount`\nShare your cookies with someone.")]),
     "streaks": ("🔥  Streaks",
                 "Send **at least one message each day** to grow your streak.",
-                [("How it works",
+                [("Commands", "`/streak` `[member]`\nSee a streak card with your week and next reward."),
+                 ("How it works",
                   "• First message of the day → Orage posts `@you streaks 5 🔥`\n"
                   "• Miss a full day → the streak resets\n"
                   f"• A new day starts at midnight (UTC{TZ_OFFSET:+g})\n"
-                  "• Your best streak shows on `/profile`")]),
+                  "• Hit milestones to earn bonus 🍪: " + " · ".join(f"{m}d" for m in sorted(MILESTONES)) + "\n"
+                  "• A longer streak also boosts `/daily`")]),
     "ngl": ("📨  Anonymous Messages", "Say it without saying who you are.",
             [("Commands",
               "`/ngl` `member` `message`\nSend an anonymous message. They can reply with a button.\n\n"
               "`/ngl_toggle`\nTurn receiving anonymous messages on or off."),
              ("Good to know", "Be kind. Admins can trace abuse.")]),
+    "shop": ("🛍️  Role Shop", "Spend your cookies on exclusive roles.",
+             [("Commands", "`/shop`\nBrowse the roles and buy one with 🍪 cookies."),
+              ("Earn cookies", "Level up by chatting · `/daily` · streak milestones · `/givecookies` from friends")]),
+    "fun": ("🎲  Fun", "Light and silly.",
+            [("Commands", "`/8ball` `question`\n`/choose` `options`\n`/hug` `member`\n"
+                          "`/ship` `member` `[member]`\n`/meow`")]),
+    "utils": ("🧰  Utilities", "Small tools that make life easier.",
+              [("Commands", "`/remind` `when` `message`\nLike `10m`, `2h` or `1h30m`.\n\n"
+                            "`/poll` `question` `options`\nOptions separated by commas.\n\n"
+                            "`/afk` `[reason]`\nOrage tells people you're away.\n\n"
+                            "`/userinfo` · `/avatar` · `/serverinfo`"),
+              ("Tickets", "`/ticket close`\nClose the ticket you're in.\n`/ticket add` `member`\nAdd someone to a ticket (staff).")]),
     "admin": ("🛠️  Server Setup", "For members with **Manage Server**.",
               [("Choose channels", "`/channel set` `feature` `#channel`\nWelcome, level-up and streak messages.\n"
                                    "`/channel clear` `feature`\nWelcome turns off; the others post where the member chatted."),
                ("Roles", "`/autorole set` `role` · `/autorole off`\n"
                          "`/levelrole add` `level` `role` · `remove` · `list`"),
+               ("Shop", "`/shopsetup` `name` `price` `[color]`\nCreate a role and sell it.\n`/shopadmin price` · `/shopadmin remove`"),
+               ("Tickets", "`/ticket setup` `channel` `staff_role` `[category]`\nPost the 🎫 panel (Partnership · Help · Suggest · Report)."),
+               ("Self-roles", "`/selfrole` `[channel]`\nPost the 🧡 *Pick Your Vibe* role panel."),
                ("Tools", "`/settings` see every setting\n`/welcome_preview` preview the welcome card\n"
                          "`/ngl_trace` `message_id` find an anonymous sender")]),
 }
@@ -342,7 +448,10 @@ class HelpView(discord.ui.View):
         opts = [discord.SelectOption(label="Home", value="home", emoji="🏠", description="Overview & quick start"),
                 discord.SelectOption(label="Cookies & Levels", value="cookies", emoji="🍪", description="Profile, daily, leaderboard"),
                 discord.SelectOption(label="Streaks", value="streaks", emoji="🔥", description="Chat daily, keep the flame"),
-                discord.SelectOption(label="Anonymous", value="ngl", emoji="📨", description="Send anonymous messages")]
+                discord.SelectOption(label="Shop", value="shop", emoji="🛍️", description="Boosts, freezes & roles"),
+                discord.SelectOption(label="Anonymous", value="ngl", emoji="📨", description="Send anonymous messages"),
+                discord.SelectOption(label="Fun", value="fun", emoji="🎲", description="8ball, hug, ship & more"),
+                discord.SelectOption(label="Utilities", value="utils", emoji="🧰", description="Remind, poll, AFK, info")]
         if is_admin:
             opts.append(discord.SelectOption(label="Server Setup", value="admin", emoji="🛠️", description="Channels, roles, rewards"))
         select = discord.ui.Select(placeholder="Choose a category…", options=opts)
@@ -381,6 +490,41 @@ async def profile(i: discord.Interaction, member: discord.Member | None = None):
     e.add_field(name="🏆 Rank", value=f"**#{rank}**", inline=True)
     e.add_field(name=f"⭐ Level {level} → {level + 1}",
                 value=f"{bar(xp, need)}  **{int(100 * xp / need)}%**\n`{xp:,} / {need:,} XP`", inline=False)
+    await i.response.send_message(embed=e)
+
+
+@bot.tree.command(name="streak", description="See a streak card")
+@app_commands.guild_only()
+async def streak_cmd(i: discord.Interaction, member: discord.Member | None = None):
+    member = member or i.user
+    if member.bot:
+        return await fail(i, "Bots don't keep streaks 🤖")
+    d = today()
+    r = db.execute("SELECT last_day, streak, best FROM streaks WHERE guild_id=? AND user_id=?",
+                   (i.guild.id, member.id)).fetchone()
+    last = r["last_day"] if r else 0
+    n, best = get_streak(i.guild.id, member.id)
+    counted = bool(r) and last == d
+
+    e = base()
+    e.set_author(name=f"{member.display_name}'s streak", icon_url=member.display_avatar.url)
+    e.set_thumbnail(url=member.display_avatar.url)
+    if n:
+        e.description = f"## 🔥 {n}-day streak"
+    else:
+        e.description = "## No streak yet\nSend a message to light the first flame ✨"
+    e.add_field(name="📅 Last 7 days", value=week_row(last, n), inline=False)
+    e.add_field(name="🎯 Next reward", value=next_reward_line(n), inline=False)
+    if counted:
+        status = "✅ Counted today"
+    elif n:
+        status = f"⏳ Chat before <t:{next_day_ts()}:R> to keep it"
+    else:
+        status = "💤 Chat today to start"
+    e.add_field(name="Status", value=status, inline=True)
+    e.add_field(name="🏆 Best", value=f"**{best}** day{'s' if best != 1 else ''}", inline=True)
+    ladder = "  ".join(f"{'✅' if best >= m else '🔒'}{m}d" for m in sorted(MILESTONES))
+    e.add_field(name="🎁 Milestones", value=ladder, inline=False)
     await i.response.send_message(embed=e)
 
 
@@ -586,6 +730,637 @@ async def ngl_toggle(i: discord.Interaction):
     await done(i, "Anonymous messages are now **OFF** 🔕")
 
 
+# ---------- Utilities ----------
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+DURATION_RE = re.compile(r"\s*(\d+)\s*([smhd])", re.I)
+NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+
+def clean(text: str) -> str:
+    return discord.utils.escape_mentions(text)
+
+
+def parse_duration(text: str) -> int | None:
+    t, pos, total = text.strip(), 0, 0
+    while pos < len(t):
+        m = DURATION_RE.match(t, pos)
+        if not m:
+            return None
+        total += int(m[1]) * UNITS[m[2].lower()]
+        pos = m.end()
+    return total or None
+
+
+@bot.tree.command(name="remind", description="Set a reminder")
+@app_commands.describe(when="Like 10m, 2h, 1d or 1h30m", message="What should I remind you about?")
+async def remind(i: discord.Interaction, when: str, message: app_commands.Range[str, 1, 300]):
+    secs = parse_duration(when)
+    if not secs or secs < 30 or secs > 30 * 86400:
+        return await fail(i, "Pick a time between 30 seconds and 30 days, like `10m`, `2h` or `1h30m`.")
+    if db.execute("SELECT COUNT(*) FROM reminders WHERE user_id=?", (i.user.id,)).fetchone()[0] >= 10:
+        return await fail(i, "You already have 10 reminders waiting.")
+    due = int(time.time()) + secs
+    with db:
+        db.execute("INSERT INTO reminders(user_id, channel_id, due, text) VALUES(?, ?, ?, ?)",
+                   (i.user.id, i.channel_id, due, message))
+    await i.response.send_message(
+        embed=base("⏰  Reminder set", f"I'll remind you <t:{due}:R>\n> {clean(message)}"), ephemeral=True)
+
+
+@tasks.loop(seconds=20)
+async def reminder_loop():
+    rows = db.execute("SELECT id, user_id, channel_id, text FROM reminders WHERE due<=?",
+                      (int(time.time()),)).fetchall()
+    for r in rows:
+        with db:
+            db.execute("DELETE FROM reminders WHERE id=?", (r["id"],))
+        e = base("⏰  Reminder", f"> {clean(r['text'])}")
+        ch = bot.get_channel(r["channel_id"]) if r["channel_id"] else None
+        try:
+            if ch:
+                await ch.send(content=f"<@{r['user_id']}>", embed=e,
+                              allowed_mentions=discord.AllowedMentions(users=True))
+            else:
+                raise discord.HTTPException
+        except Exception:
+            try:
+                user = await bot.fetch_user(r["user_id"])
+                await user.send(embed=e)
+            except discord.HTTPException:
+                pass
+
+
+@reminder_loop.before_loop
+async def before_reminder_loop():
+    await bot.wait_until_ready()
+
+
+@bot.tree.command(name="poll", description="Create a quick poll")
+@app_commands.guild_only()
+@app_commands.describe(question="What are you asking?", options="2-5 options separated by commas")
+async def poll(i: discord.Interaction, question: app_commands.Range[str, 1, 200], options: str):
+    opts = [o.strip() for o in options.split(",") if o.strip()]
+    if not 2 <= len(opts) <= 5:
+        return await fail(i, "Give me 2 to 5 options, separated by commas.")
+    e = base(f"📊  {clean(question)}", "\n".join(f"{NUMS[n]}  {clean(o)}" for n, o in enumerate(opts)))
+    e.set_author(name=f"Poll by {i.user.display_name}", icon_url=i.user.display_avatar.url)
+    await i.response.send_message(embed=e)
+    msg = await i.original_response()
+    for n in range(len(opts)):
+        try:
+            await msg.add_reaction(NUMS[n])
+        except discord.HTTPException:
+            break
+
+
+async def handle_afk(msg: discord.Message):
+    gid, uid = msg.guild.id, msg.author.id
+    if (gid, uid) in afk_users:
+        afk_users.discard((gid, uid))
+        with db:
+            db.execute("DELETE FROM afk WHERE guild_id=? AND user_id=?", (gid, uid))
+        await msg.channel.send(embed=ok_embed(f"Welcome back, {msg.author.mention}! AFK removed."),
+                               delete_after=10, allowed_mentions=discord.AllowedMentions.none())
+    seen = set()
+    for m in msg.mentions:
+        if m.id == uid or m.bot or m.id in seen or (gid, m.id) not in afk_users:
+            continue
+        seen.add(m.id)
+        r = db.execute("SELECT reason, since FROM afk WHERE guild_id=? AND user_id=?", (gid, m.id)).fetchone()
+        if r:
+            await msg.reply(embed=base(desc=f"💤  **{m.display_name}** is AFK: {clean(r['reason'])}\n"
+                                            f"-# Since <t:{r['since']}:R>", footer=False),
+                            mention_author=False, delete_after=15)
+
+
+@bot.tree.command(name="afk", description="Let people know you're away")
+@app_commands.guild_only()
+async def afk(i: discord.Interaction, reason: app_commands.Range[str, 1, 100] = "AFK"):
+    with db:
+        db.execute("INSERT OR REPLACE INTO afk VALUES(?, ?, ?, ?)",
+                   (i.guild.id, i.user.id, reason, int(time.time())))
+    afk_users.add((i.guild.id, i.user.id))
+    await i.response.send_message(embed=base(desc=f"💤  {i.user.mention} is now AFK: {clean(reason)}", footer=False))
+
+
+@bot.tree.command(name="avatar", description="Show someone's avatar")
+async def avatar(i: discord.Interaction, member: discord.User | None = None):
+    member = member or i.user
+    e = base(f"{member.display_name}'s avatar")
+    e.set_image(url=member.display_avatar.with_size(1024).url)
+    await i.response.send_message(embed=e)
+
+
+@bot.tree.command(name="userinfo", description="Show info about a member")
+@app_commands.guild_only()
+async def userinfo(i: discord.Interaction, member: discord.Member | None = None):
+    member = member or i.user
+    with db:
+        row = get_user(i.guild.id, member.id)
+    streak, _ = get_streak(i.guild.id, member.id)
+    roles = [r.mention for r in reversed(member.roles[1:])]
+    e = base(desc=f"{member.mention}\n-# ID: {member.id}")
+    e.set_author(name=str(member), icon_url=member.display_avatar.url)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.add_field(name="📅 Joined", value=discord.utils.format_dt(member.joined_at, "D") if member.joined_at else "?", inline=True)
+    e.add_field(name="🎂 Created", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
+    e.add_field(name="⭐ Level", value=f"{row['level']} · {row['cookies']:,} 🍪 · {streak} 🔥", inline=False)
+    e.add_field(name=f"🎭 Roles ({len(roles)})", value=" ".join(roles[:8]) + (" …" if len(roles) > 8 else "") or "None", inline=False)
+    await i.response.send_message(embed=e)
+
+
+@bot.tree.command(name="serverinfo", description="Show info about this server")
+@app_commands.guild_only()
+async def serverinfo(i: discord.Interaction):
+    g = i.guild
+    e = base(g.name, f"-# ID: {g.id}")
+    if g.icon:
+        e.set_thumbnail(url=g.icon.url)
+    e.add_field(name="👑 Owner", value=f"<@{g.owner_id}>", inline=True)
+    e.add_field(name="👥 Members", value=f"{g.member_count:,}", inline=True)
+    e.add_field(name="🚀 Boosts", value=str(g.premium_subscription_count), inline=True)
+    e.add_field(name="💬 Channels", value=f"{len(g.text_channels)} text · {len(g.voice_channels)} voice", inline=True)
+    e.add_field(name="🎭 Roles", value=str(len(g.roles) - 1), inline=True)
+    e.add_field(name="🎂 Created", value=discord.utils.format_dt(g.created_at, "D"), inline=True)
+    await i.response.send_message(embed=e)
+
+
+# ---------- Fun ----------
+EIGHT_BALL = ["Yes, definitely!", "It is certain.", "Looks good to me.", "Ask again later.",
+              "I can't tell right now.", "Hmm, doubtful.", "My sources say no.", "Absolutely not."]
+HUGS = ["wraps them in the warmest hug 🤗", "sends a big cozy hug 🧡", "gives a gentle head-pat and a hug 🐾",
+        "squeezes them tight 🫂", "shares a hug and a fresh cookie 🍪"]
+MEOWS = ["Cats sleep 12-16 hours a day.", "A cat's purr can help calm stress.",
+         "Cats have a special ear muscle set that lets them rotate their ears.",
+         "Orange cats are mostly boys, about 80% of them!",
+         "A cat's nose print is as unique as a fingerprint.", "Cats can jump up to six times their body length."]
+@bot.tree.command(name="8ball", description="Ask the magic 8-ball")
+async def eight_ball(i: discord.Interaction, question: app_commands.Range[str, 1, 200]):
+    e = base("🔮  Magic 8-ball")
+    e.add_field(name="You asked", value=clean(question), inline=False)
+    e.add_field(name="Orage says", value=f"**{random.choice(EIGHT_BALL)}**", inline=False)
+    await i.response.send_message(embed=e)
+
+
+@bot.tree.command(name="choose", description="Let Orage decide for you")
+@app_commands.describe(options="Separate with commas, e.g. pizza, noodles, rice")
+async def choose(i: discord.Interaction, options: str):
+    opts = [o.strip() for o in options.split(",") if o.strip()]
+    if len(opts) < 2:
+        return await fail(i, "Give me at least 2 options, separated by commas.")
+    await i.response.send_message(embed=base("🤔  Orage picks…", f"**{clean(random.choice(opts))}**"))
+
+
+@bot.tree.command(name="hug", description="Give someone a hug")
+@app_commands.guild_only()
+async def hug(i: discord.Interaction, member: discord.Member):
+    if member.id == i.user.id:
+        return await fail(i, "Hug someone else, I'll hug you after 🐱")
+    await i.response.send_message(embed=base(desc=f"{i.user.mention} {random.choice(HUGS)} → {member.mention}", footer=False))
+
+
+@bot.tree.command(name="ship", description="Check how well two people match")
+@app_commands.guild_only()
+async def ship(i: discord.Interaction, first: discord.Member, second: discord.Member | None = None):
+    second = second or i.user
+    a, b = sorted([first.id, second.id])
+    pct = int(hashlib.md5(f"{a}-{b}".encode()).hexdigest(), 16) % 101
+    hearts = round(pct / 10)
+    note = ("Just friends 🐾" if pct < 30 else "There's a spark ✨" if pct < 60
+            else "Cute together 🧡" if pct < 85 else "Meant to be 💞")
+    h1, h2 = first.display_name, second.display_name
+    name = h1[:max(1, len(h1) // 2)] + h2[len(h2) // 2:]
+    e = base("💘  Ship", f"{first.mention} × {second.mention}\n\n**{clean(name)}**\n"
+                         f"{'🧡' * hearts}{'🤍' * (10 - hearts)}  **{pct}%**\n{note}")
+    await i.response.send_message(embed=e)
+
+
+@bot.tree.command(name="meow", description="Orage shares a cat moment")
+async def meow(i: discord.Interaction):
+    await i.response.send_message(embed=base("🐱  Meow!", random.choice(MEOWS)))
+
+
+# ---------- Shop (roles only) ----------
+def shop_items(gid: int) -> list:
+    return db.execute("SELECT * FROM shop_items WHERE guild_id=? AND kind='role' ORDER BY price, id", (gid,)).fetchall()
+
+
+def find_item(gid: int, arg: str):
+    if arg.isdigit():
+        r = db.execute("SELECT * FROM shop_items WHERE guild_id=? AND id=? AND kind='role'", (gid, int(arg))).fetchone()
+        if r:
+            return r
+    return db.execute("SELECT * FROM shop_items WHERE guild_id=? AND kind='role' AND LOWER(name)=LOWER(?)",
+                      (gid, arg)).fetchone()
+
+
+def shop_embed(member: discord.Member, cookies: int, items: list) -> discord.Embed:
+    lines = []
+    for r in items:
+        owned = any(role.id == r["role_id"] for role in member.roles)
+        lines.append(f"<@&{r['role_id']}> · 🍪 **{r['price']:,}**{'  ✅ *Owned*' if owned else ''}\n"
+                     f"-# {clean(r['description'])}")
+    body = "\n\n".join(lines) if lines else "No roles yet. Admins can create some with `/shopsetup`."
+    e = base("🛍️  Role Shop", f"You have **{cookies:,}** 🍪\n\n{body}")
+    if member.guild.icon:
+        e.set_thumbnail(url=member.guild.icon.url)
+    return e
+
+
+async def do_purchase(i: discord.Interaction, item) -> tuple[bool, str]:
+    gid, uid, price = i.guild.id, i.user.id, item["price"]
+    role = i.guild.get_role(item["role_id"])
+    if not role or not role.is_assignable():
+        return False, "That role isn't available right now."
+    if role in i.user.roles:
+        return False, "You already have this role."
+    with db:
+        have = get_user(gid, uid)["cookies"]
+        if have < price:
+            return False, f"You need **{price:,}** 🍪 but only have **{have:,}**."
+        db.execute("UPDATE users SET cookies = cookies - ? WHERE guild_id=? AND user_id=?", (price, gid, uid))
+    try:
+        await i.user.add_roles(role, reason="Orage shop")
+    except discord.HTTPException:
+        with db:  # refund
+            db.execute("UPDATE users SET cookies = cookies + ? WHERE guild_id=? AND user_id=?", (price, gid, uid))
+        return False, "I couldn't give you that role. You were not charged."
+    return True, f"You got {role.mention}! 🎭"
+
+
+class ConfirmBuy(discord.ui.View):
+    def __init__(self, item_id: int):
+        super().__init__(timeout=60)
+        self.item_id = item_id
+
+    @discord.ui.button(label="Buy", emoji="🛒", style=discord.ButtonStyle.success)
+    async def buy(self, i: discord.Interaction, _):
+        item = db.execute("SELECT * FROM shop_items WHERE id=? AND guild_id=?", (self.item_id, i.guild.id)).fetchone()
+        if not item:
+            return await i.response.edit_message(embed=err_embed("That item is gone."), view=None)
+        ok, text = await do_purchase(i, item)
+        await i.response.edit_message(embed=ok_embed(text) if ok else err_embed(text), view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, i: discord.Interaction, _):
+        await i.response.edit_message(embed=base(desc="Purchase cancelled.", footer=False), view=None)
+
+
+class ShopView(discord.ui.View):
+    def __init__(self, items: list, member: discord.Member):
+        super().__init__(timeout=300)
+        if items:
+            owned = {r.id for r in member.roles}
+            opts = [discord.SelectOption(label=r["name"][:100], value=str(r["id"]), emoji="🎭",
+                                         description=(f"✅ Owned" if r["role_id"] in owned else f"🍪 {r['price']:,}")[:100])
+                    for r in items[:25]]
+            sel = discord.ui.Select(placeholder="Pick a role to buy…", options=opts)
+            sel.callback = self.pick
+            self.add_item(sel)
+
+    async def pick(self, i: discord.Interaction):
+        item = db.execute("SELECT * FROM shop_items WHERE id=? AND guild_id=?",
+                          (int(i.data["values"][0]), i.guild.id)).fetchone()
+        if not item:
+            return await fail(i, "That role is gone.")
+        e = base("🛒  Confirm purchase", f"<@&{item['role_id']}>\nPrice: 🍪 **{item['price']:,}**\n"
+                                         f"-# {clean(item['description'])}")
+        await i.response.send_message(embed=e, view=ConfirmBuy(item["id"]), ephemeral=True)
+
+
+@bot.tree.command(name="shop", description="Buy exclusive roles with cookies")
+@app_commands.guild_only()
+async def shop(i: discord.Interaction):
+    items = shop_items(i.guild.id)
+    with db:
+        cookies = get_user(i.guild.id, i.user.id)["cookies"]
+    await i.response.send_message(embed=shop_embed(i.user, cookies, items), view=ShopView(items, i.user), ephemeral=True)
+
+
+# ---------- Tickets ----------
+TICKET_TYPES = {  # kind: (emoji, label, [(question, style)])
+    "partnership": ("🤝", "Partnership", [("Server name & invite link", discord.TextStyle.short),
+                                          ("What can you offer?", discord.TextStyle.paragraph)]),
+    "help": ("🆘", "Help", [("What do you need help with?", discord.TextStyle.paragraph)]),
+    "suggest": ("💡", "Suggestion", [("Your suggestion", discord.TextStyle.paragraph)]),
+    "report": ("🚨", "Report", [("Who or what are you reporting?", discord.TextStyle.short),
+                                ("What happened?", discord.TextStyle.paragraph)]),
+}
+
+
+def ticket_cfg(gid: int):
+    return db.execute("SELECT staff_role_id, category_id FROM ticket_config WHERE guild_id=?", (gid,)).fetchone()
+
+
+def is_staff(member: discord.Member) -> bool:
+    cfg = ticket_cfg(member.guild.id)
+    return member.guild_permissions.manage_guild or bool(
+        cfg and any(r.id == cfg["staff_role_id"] for r in member.roles))
+
+
+async def ticket_precheck(i: discord.Interaction):
+    """Returns the staff role if the member may open a ticket, else answers with an error and returns None."""
+    g, cfg = i.guild, ticket_cfg(i.guild.id)
+    staff = g.get_role(cfg["staff_role_id"]) if cfg else None
+    if not staff:
+        await fail(i, "Tickets aren't set up yet. Ask an admin to run `/ticket setup`.")
+        return None
+    old = db.execute("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=?", (g.id, i.user.id)).fetchone()
+    if old:
+        if g.get_channel(old["channel_id"]):
+            await fail(i, f"You already have an open ticket: <#{old['channel_id']}>")
+            return None
+        with db:
+            db.execute("DELETE FROM tickets WHERE channel_id=?", (old["channel_id"],))
+    return staff
+
+
+class TicketModal(discord.ui.Modal):
+    def __init__(self, kind: str):
+        emoji, label, fields = TICKET_TYPES[kind]
+        super().__init__(title=f"{emoji} {label}")
+        self.kind, self.inputs = kind, []
+        for question, style in fields:
+            t = discord.ui.TextInput(label=question, style=style, required=True,
+                                     max_length=1000 if style == discord.TextStyle.paragraph else 200)
+            self.add_item(t)
+            self.inputs.append(t)
+
+    async def on_submit(self, i: discord.Interaction):
+        await create_ticket(i, self.kind, [(t.label, str(t)) for t in self.inputs])
+
+
+async def create_ticket(i: discord.Interaction, kind: str, answers: list):
+    staff = await ticket_precheck(i)
+    if not staff:
+        return
+    g, cfg = i.guild, ticket_cfg(i.guild.id)
+    emoji, label, _ = TICKET_TYPES[kind]
+    await i.response.defer(ephemeral=True)
+    category = g.get_channel(cfg["category_id"]) if cfg["category_id"] else None
+    slug = re.sub(r"[^a-z0-9]+", "-", i.user.name.lower()).strip("-") or "user"
+    overwrites = {
+        g.default_role: discord.PermissionOverwrite(view_channel=False),
+        i.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True,
+                                            read_message_history=True),
+        staff: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True,
+                                           read_message_history=True, manage_messages=True),
+        g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True,
+                                          read_message_history=True, manage_channels=True),
+    }
+    try:
+        ch = await g.create_text_channel(f"{kind}-{slug}", category=category, overwrites=overwrites,
+                                         topic=f"{label} ticket · {i.user} ({i.user.id})", reason="Orage ticket")
+    except discord.HTTPException:
+        return await i.followup.send(embed=err_embed("I couldn't create the channel. I need **Manage Channels**."),
+                                     ephemeral=True)
+    with db:
+        db.execute("INSERT INTO tickets(channel_id, guild_id, user_id, created, kind) VALUES(?, ?, ?, ?, ?)",
+                   (ch.id, g.id, i.user.id, int(time.time()), kind))
+    e = base(f"{emoji}  {label} ticket",
+             f"Hi {i.user.mention}, thanks for reaching out! {staff.mention} will be with you soon.\n"
+             "-# Staff can press **Claim** to take this ticket.")
+    for question, answer in answers:
+        e.add_field(name=question, value=clean(answer)[:1000], inline=False)
+    await ch.send(content=f"{i.user.mention} {staff.mention}", embed=e, view=TicketControlView(),
+                  allowed_mentions=discord.AllowedMentions(users=[i.user], roles=[staff]))
+    await i.followup.send(embed=ok_embed(f"Your ticket is ready: {ch.mention}"), ephemeral=True)
+
+
+async def close_ticket(i: discord.Interaction):
+    row = db.execute("SELECT user_id FROM tickets WHERE channel_id=?", (i.channel_id,)).fetchone()
+    if not row:
+        return await fail(i, "This isn't a ticket channel.")
+    if i.user.id != row["user_id"] and not is_staff(i.user):
+        return await fail(i, "Only the ticket owner or staff can close this.")
+    await i.response.send_message(embed=base(desc="🔒  Closing this ticket in 5 seconds…", footer=False))
+    await asyncio.sleep(5)
+    with db:
+        db.execute("DELETE FROM tickets WHERE channel_id=?", (i.channel_id,))
+    try:
+        await i.channel.delete(reason=f"Ticket closed by {i.user}")
+    except discord.HTTPException:
+        pass
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def go(self, i: discord.Interaction, kind: str):
+        if await ticket_precheck(i):
+            await i.response.send_modal(TicketModal(kind))
+
+    @discord.ui.button(label="Partnership", emoji="🤝", style=discord.ButtonStyle.primary,
+                       custom_id="orage:ticket:partnership")
+    async def b_partnership(self, i: discord.Interaction, _):
+        await self.go(i, "partnership")
+
+    @discord.ui.button(label="Help", emoji="🆘", style=discord.ButtonStyle.success, custom_id="orage:ticket:help")
+    async def b_help(self, i: discord.Interaction, _):
+        await self.go(i, "help")
+
+    @discord.ui.button(label="Suggest", emoji="💡", style=discord.ButtonStyle.secondary,
+                       custom_id="orage:ticket:suggest")
+    async def b_suggest(self, i: discord.Interaction, _):
+        await self.go(i, "suggest")
+
+    @discord.ui.button(label="Report", emoji="🚨", style=discord.ButtonStyle.danger, custom_id="orage:ticket:report")
+    async def b_report(self, i: discord.Interaction, _):
+        await self.go(i, "report")
+
+
+class TicketControlView(discord.ui.View):
+    def __init__(self, claimed: bool = False):
+        super().__init__(timeout=None)
+        if claimed:
+            for c in self.children:
+                if getattr(c, "custom_id", "") == "orage:ticket:claim":
+                    c.disabled, c.label = True, "Claimed"
+
+    @discord.ui.button(label="Claim", emoji="🙋", style=discord.ButtonStyle.success, custom_id="orage:ticket:claim")
+    async def claim(self, i: discord.Interaction, _):
+        row = db.execute("SELECT claimed_by FROM tickets WHERE channel_id=?", (i.channel_id,)).fetchone()
+        if not row:
+            return await fail(i, "This isn't a ticket channel.")
+        if not is_staff(i.user):
+            return await fail(i, "Only staff can claim tickets.")
+        if row["claimed_by"]:
+            return await fail(i, f"Already claimed by <@{row['claimed_by']}>.")
+        with db:
+            db.execute("UPDATE tickets SET claimed_by=? WHERE channel_id=? AND claimed_by IS NULL",
+                       (i.user.id, i.channel_id))
+        e = discord.Embed.from_dict(i.message.embeds[0].to_dict())
+        e.add_field(name="🙋 Claimed by", value=i.user.mention, inline=False)
+        await i.response.edit_message(embed=e, view=TicketControlView(claimed=True))
+        await i.channel.send(embed=base(desc=f"🙋  {i.user.mention} claimed this ticket and will help you now.",
+                                        footer=False),
+                             allowed_mentions=discord.AllowedMentions.none())
+
+    @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="orage:ticket:close")
+    async def close_btn(self, i: discord.Interaction, _):
+        await close_ticket(i)
+
+
+@bot.event
+async def on_guild_channel_delete(ch):
+    with db:
+        db.execute("DELETE FROM tickets WHERE channel_id=?", (ch.id,))
+
+
+ticket_group = app_commands.Group(name="ticket", description="Support tickets", guild_only=True)
+
+
+@ticket_group.command(name="setup", description="Post the ticket panel in a channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Where the 🎫 panel goes", staff_role="Role that can see and answer tickets",
+                       category="Category for new tickets (optional)")
+async def ticket_setup(i: discord.Interaction, channel: discord.TextChannel, staff_role: discord.Role,
+                       category: discord.CategoryChannel | None = None):
+    me = i.guild.me
+    p = channel.permissions_for(me)
+    if not (p.view_channel and p.send_messages and p.embed_links) or not me.guild_permissions.manage_channels:
+        return await fail(i, f"I need **Manage Channels** and *Send Messages* + *Embed Links* in {channel.mention}.")
+    with db:
+        db.execute("INSERT INTO ticket_config VALUES(?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+                   "staff_role_id=excluded.staff_role_id, category_id=excluded.category_id",
+                   (i.guild.id, staff_role.id, category.id if category else 0))
+    e = base("🎫  Contact the Team",
+             "Pick what fits and we'll open a **private ticket** just for you:\n\n"
+             "🤝 **Partnership** · collab with us\n"
+             "🆘 **Help** · need a hand?\n"
+             "💡 **Suggest** · got an idea?\n"
+             "🚨 **Report** · something's wrong")
+    if i.guild.icon:
+        e.set_thumbnail(url=i.guild.icon.url)
+    await channel.send(embed=e, view=TicketPanelView())
+    await done(i, f"Ticket panel posted in {channel.mention}. Staff: {staff_role.mention}")
+
+
+@ticket_group.command(name="close", description="Close the ticket you're in")
+async def ticket_close(i: discord.Interaction):
+    await close_ticket(i)
+
+
+@ticket_group.command(name="add", description="Add someone to this ticket (staff)")
+async def ticket_add(i: discord.Interaction, member: discord.Member):
+    if not db.execute("SELECT 1 FROM tickets WHERE channel_id=?", (i.channel_id,)).fetchone():
+        return await fail(i, "This isn't a ticket channel.")
+    if not is_staff(i.user):
+        return await fail(i, "Only staff can add people to a ticket.")
+    await i.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True,
+                                    attach_files=True)
+    await i.response.send_message(embed=ok_embed(f"{member.mention} was added to this ticket."))
+
+
+# ---------- Self roles ("Pick Your Vibe") ----------
+# Edit role IDs / labels here. exclusive=True means picking one removes the others in that group.
+SELFROLES = [
+    {"title": "👤 Identity", "note": "Pick one. Switching replaces the other.", "exclusive": True,
+     "roles": [(1566264857055994006, "Male", "♂️", discord.ButtonStyle.secondary),
+               (1566265056079913060, "Female", "♀️", discord.ButtonStyle.secondary)]},
+    {"title": "🔔 Stay in the Loop", "note": "Chat reviews, updates and surprises.", "exclusive": False,
+     "roles": [(1570801878965559377, "Ayhoo Ping", "🔔", discord.ButtonStyle.success)]},
+]
+
+
+def selfrole_lookup(rid: int):
+    for group in SELFROLES:
+        for role in group["roles"]:
+            if role[0] == rid:
+                return group, role
+    return None
+
+
+class SelfRoleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"orage:sr:(?P<id>[0-9]+)"):
+    def __init__(self, rid: int, label: str = "Role", emoji: str | None = None,
+                 style: discord.ButtonStyle = discord.ButtonStyle.secondary):
+        super().__init__(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"orage:sr:{rid}"))
+        self.rid = rid
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        rid = int(match["id"])
+        found = selfrole_lookup(rid)
+        return cls(rid, *found[1][1:]) if found else cls(rid)
+
+    async def callback(self, i: discord.Interaction):
+        found = selfrole_lookup(self.rid)
+        group, member = (found[0] if found else None), i.user
+        role = i.guild.get_role(self.rid)
+        if not role or not role.is_assignable():
+            return await fail(i, "I can't manage that role. Move the **Orage** role above it.")
+        try:
+            if role in member.roles:
+                await member.remove_roles(role, reason="Orage self-role")
+                return await done(i, f"Removed {role.mention} 👋")
+            swapped = []
+            if group and group["exclusive"]:
+                swapped = [o for o in (i.guild.get_role(r[0]) for r in group["roles"] if r[0] != self.rid)
+                           if o and o in member.roles]
+                if swapped:
+                    await member.remove_roles(*swapped, reason="Orage self-role")
+            await member.add_roles(role, reason="Orage self-role")
+        except discord.HTTPException:
+            return await fail(i, "Something went wrong. Try again!")
+        extra = f"\n-# Replaced {', '.join(o.mention for o in swapped)}" if swapped else ""
+        await done(i, f"You're now {role.mention} ✨{extra}")
+
+
+class SelfRoleMine(discord.ui.DynamicItem[discord.ui.Button], template=r"orage:sr:mine"):
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="My roles", emoji="✨", style=discord.ButtonStyle.secondary,
+                                           custom_id="orage:sr:mine"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls()
+
+    async def callback(self, i: discord.Interaction):
+        have = {r.id for r in i.user.roles}
+        lines = [f"{'✅' if rid in have else '▫️'} <@&{rid}>" for g in SELFROLES for rid, *_ in g["roles"]]
+        await i.response.send_message(embed=base("✨  Your vibe", "\n".join(lines)), ephemeral=True)
+
+
+def selfrole_embed(guild: discord.Guild) -> discord.Embed:
+    e = discord.Embed(title="✨ Pick Your Vibe", color=ORANGE, description=(
+        "Make yourself at home! Tap a button to grab a role, and tap it again anytime to take it off. 🧡"))
+    for g in SELFROLES:
+        lines = "\n".join(f"{emoji} <@&{rid}>" for rid, _, emoji, _ in g["roles"])
+        e.add_field(name=g["title"], value=f"{lines}\n-# {g['note']}", inline=False)
+    e.set_footer(text="— Orage • Talk. Play. Create. Connect.",
+                 icon_url=bot.user.display_avatar.url if bot.user else None)
+    if guild.icon:
+        e.set_thumbnail(url=guild.icon.url)
+    return e
+
+
+@bot.tree.command(name="selfrole", description="Post the self-role panel")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Where to post it (default: this channel)")
+async def selfrole(i: discord.Interaction, channel: discord.TextChannel | None = None):
+    channel = channel or i.channel
+    for g in SELFROLES:
+        for rid, label, _, _ in g["roles"]:
+            role = i.guild.get_role(rid)
+            if not role:
+                return await fail(i, f"I can't find the **{label}** role (ID `{rid}`). Fix the IDs in `SELFROLES`.")
+            if not role.is_assignable():
+                return await fail(i, f"I can't assign {role.mention}. Move the **Orage** role above it and give me *Manage Roles*.")
+    view = discord.ui.View(timeout=None)
+    for g in SELFROLES:
+        for rid, label, emoji, style in g["roles"]:
+            view.add_item(SelfRoleButton(rid, label, emoji, style))
+    view.add_item(SelfRoleMine())
+    try:
+        await channel.send(embed=selfrole_embed(i.guild), view=view)
+    except discord.HTTPException:
+        return await fail(i, f"I can't post in {channel.mention}.")
+    await done(i, f"Self-role panel posted in {channel.mention}")
+
+
 # ---------- Admin: setup ----------
 ADMIN = dict(guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
 perm = app_commands.checks.has_permissions(manage_guild=True)
@@ -667,6 +1442,77 @@ async def levelrole_list(i: discord.Interaction):
     await i.response.send_message(embed=base("🎖️  Level rewards", text), ephemeral=True)
 
 
+shopadmin_group = app_commands.Group(name="shopadmin", description="Manage the role shop", **ADMIN)
+
+
+async def item_autocomplete(i: discord.Interaction, current: str):
+    return [app_commands.Choice(name=r["name"][:100], value=str(r["id"]))
+            for r in shop_items(i.guild.id) if current.lower() in r["name"].lower()][:25]
+
+
+@bot.tree.command(name="shopsetup", description="Create a role and sell it in the shop")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@perm
+@app_commands.describe(name="Role name", price="Cookies it costs", color="Hex color like #FF9500 (optional)",
+                       description="Short description (optional)")
+async def shopsetup(i: discord.Interaction, name: app_commands.Range[str, 1, 60],
+                    price: app_commands.Range[int, 1, 10_000_000], color: str | None = None,
+                    description: str | None = None):
+    if not i.guild.me.guild_permissions.manage_roles:
+        return await fail(i, "I need the **Manage Roles** permission to create roles.")
+    if color and not re.fullmatch(r"#?[0-9a-fA-F]{6}", color.strip()):
+        return await fail(i, "Color must be a hex code like `#FF9500`.")
+    items = shop_items(i.guild.id)
+    if len(items) >= 20:
+        return await fail(i, "The shop is full (20 roles). Remove one first.")
+    if any(r["name"].lower() == name.lower() for r in items):
+        return await fail(i, "There's already a shop role with that name.")
+    colour = discord.Colour(int(color.strip().lstrip("#"), 16)) if color else discord.Colour(ORANGE)
+    try:
+        role = await i.guild.create_role(name=name, colour=colour, permissions=discord.Permissions.none(),
+                                         reason=f"Orage shop role by {i.user}")
+    except discord.HTTPException:
+        return await fail(i, "I couldn't create the role. Check my permissions.")
+    with db:
+        db.execute("INSERT INTO shop_items(guild_id, kind, name, description, price, role_id) VALUES(?, ?, ?, ?, ?, ?)",
+                   (i.guild.id, "role", name, (description or f"Show off the {name} role.")[:80], price, role.id))
+    await done(i, f"Created {role.mention} and added it to the shop for 🍪 **{price:,}**.\n"
+                  "-# Drag it in Server Settings → Roles if you want it higher in the list.")
+
+
+@shopadmin_group.command(name="price", description="Change a role's price")
+@perm
+async def shop_price(i: discord.Interaction, item: str, price: app_commands.Range[int, 1, 10_000_000]):
+    row = find_item(i.guild.id, item)
+    if not row:
+        return await fail(i, "I can't find that role in the shop.")
+    with db:
+        db.execute("UPDATE shop_items SET price=? WHERE id=?", (price, row["id"]))
+    await done(i, f"<@&{row['role_id']}> now costs 🍪 **{price:,}**")
+
+
+@shopadmin_group.command(name="remove", description="Remove a role from the shop")
+@perm
+@app_commands.describe(delete_role="Also delete the Discord role itself")
+async def shop_remove(i: discord.Interaction, item: str, delete_role: bool = False):
+    row = find_item(i.guild.id, item)
+    if not row:
+        return await fail(i, "I can't find that role in the shop.")
+    with db:
+        db.execute("DELETE FROM shop_items WHERE id=?", (row["id"],))
+    if delete_role and (role := i.guild.get_role(row["role_id"])):
+        try:
+            await role.delete(reason=f"Removed from Orage shop by {i.user}")
+        except discord.HTTPException:
+            pass
+    await done(i, f"Removed **{clean(row['name'])}** from the shop.")
+
+
+shop_price.autocomplete("item")(item_autocomplete)
+shop_remove.autocomplete("item")(item_autocomplete)
+
+
 @bot.tree.command(name="settings", description="See Orage's settings for this server")
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
@@ -717,7 +1563,7 @@ async def ngl_trace(i: discord.Interaction, message_id: str):
         embed=base("🔎  Trace", f"Sender: <@{row['sender_id']}>\nTarget: <@{row['target_id']}>"), ephemeral=True)
 
 
-for grp in (channel_group, autorole_group, levelrole_group):
+for grp in (channel_group, autorole_group, levelrole_group, shopadmin_group, ticket_group):
     bot.tree.add_command(grp)
 
 
