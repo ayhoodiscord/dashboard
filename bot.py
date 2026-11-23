@@ -21,7 +21,7 @@ TZ_OFFSET = float(os.getenv("TZ_OFFSET_HOURS", "7"))  # a new "day" starts at mi
 # ---------- Settings (tweak freely) ----------
 ORANGE = 0xFF9500
 RED = 0xE5484D
-FOOTER = "Orage • Chat, level up, collect cookies"
+FOOTER = "Orage"
 XP_MIN, XP_MAX = 15, 25
 XP_COOLDOWN = 30
 NGL_COOLDOWN = 30
@@ -29,6 +29,7 @@ NGL_MAX_LEN = 300
 DAILY_BASE = 50
 DAILY_STREAK_BONUS = 10   # extra cookies per streak day
 DAILY_STREAK_CAP = 7      # bonus stops growing after this many days
+OWNER_ID = 922394768397455391  # only this user can run /doublexp
 DEFAULT_AUTOROLE_ID = 1557736869838462976  # used until you run /autorole set or /autorole off
 WHERE_TO_START = (  # to link a channel write <#CHANNEL_ID>
     "📸 Try the **Daily Challenge** in the challenges channel\n"
@@ -93,6 +94,8 @@ with db:
         guild_id INTEGER PRIMARY KEY, staff_role_id INTEGER, category_id INTEGER);
     CREATE TABLE IF NOT EXISTS tickets(
         channel_id INTEGER PRIMARY KEY, guild_id INTEGER, user_id INTEGER, created INTEGER);
+    CREATE TABLE IF NOT EXISTS xp_events(guild_id INTEGER PRIMARY KEY, until INTEGER);
+    CREATE TABLE IF NOT EXISTS challenge_posts(guild_id INTEGER PRIMARY KEY, last_day INTEGER);
     CREATE TABLE IF NOT EXISTS reminders(
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id INTEGER,
         due INTEGER, text TEXT);
@@ -214,6 +217,7 @@ async def post_to(guild: discord.Guild, kind: str, fallback, **kwargs):
 async def setup_hook():
     bot.add_dynamic_items(NGLReply, SelfRoleButton, SelfRoleMine)
     reminder_loop.start()
+    challenge_loop.start()
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     await bot.tree.sync()
@@ -281,7 +285,7 @@ async def on_message(msg: discord.Message):
 
     with db:
         row = get_user(*key)
-        level, xp, cookies = row["level"], row["xp"] + random.randint(XP_MIN, XP_MAX), row["cookies"]
+        level, xp, cookies = row["level"], row["xp"] + random.randint(XP_MIN, XP_MAX) * xp_mult(msg.guild.id), row["cookies"]
         start_level, reward = level, 0
         while xp >= xp_needed(level):
             xp -= xp_needed(level)
@@ -309,7 +313,7 @@ def welcome_embed(member: discord.Member) -> discord.Embed:
     e.add_field(name="🌟 Where to start", value=WHERE_TO_START, inline=False)
     e.add_field(name="\u200b", value="*Talk. Play. Create. Connect.*", inline=False)
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text="— Orage • Glad you're here 🧡",
+    e.set_footer(text="Orage",
                  icon_url=bot.user.display_avatar.url if bot.user else None)
     return e
 
@@ -318,6 +322,7 @@ def welcome_embed(member: discord.Member) -> discord.Embed:
 async def on_member_join(member: discord.Member):
     if member.bot:
         return
+    await send_log(member.guild, "📥  Member joined", f"{member.mention} · `{member}`\nAccount created <t:{int(member.created_at.timestamp())}:R>", member)
     rid = get_autorole(member.guild.id)
     if rid and (role := member.guild.get_role(rid)):
         try:
@@ -339,7 +344,7 @@ HELP_PAGES = {
              [("✨ How it works",
                "Send messages → earn XP\nLevel up → earn 🍪 cookies & roles\nChat once a day → keep your 🔥 streak"),
               ("🚀 Quick start",
-               "`/profile` see your card\n`/daily` claim free cookies\n`/shop` spend your cookies\n`/leaderboard` see the top members")]),
+               "`/profile` see your card\n`/daily` claim free cookies\n`/shop` spend your cookies\n`/challenge` today's challenge\n`/leaderboard` see the top members")]),
     "cookies": ("🍪  Cookies & Levels", "Everything about your progress.",
                 [("Commands",
                   "`/profile` `[member]`\nView a profile card.\n\n"
@@ -378,6 +383,7 @@ HELP_PAGES = {
                ("Shop", "`/shopsetup` `name` `price` `[color]`\nCreate a role and sell it.\n`/shopadmin price` · `/shopadmin remove`"),
                ("Tickets", "`/ticket setup` `channel` `staff_role` `[category]`\nPost the 🎫 panel (Partnership · Help · Suggest · Report)."),
                ("Self-roles", "`/selfrole` `[channel]`\nPost the 🧡 *Pick Your Vibe* role panel."),
+               ("Logs & challenge", "`/setlog` `[channel]`\nSend all server logs to one channel (leave empty to turn off).\n`/channel set` → *Daily challenge* posts a new one every day."),
                ("Tools", "`/settings` see every setting\n`/welcome_preview` preview the welcome card\n"
                          "`/ngl_trace` `message_id` find an anonymous sender")]),
 }
@@ -633,8 +639,8 @@ async def ngl(i: discord.Interaction, member: discord.Member,
         return await fail(i, f"Slow down! Try again in {int(wait) + 1}s ⏳")
     ngl_last[i.user.id] = time.time()
 
-    e = base("📨  Anonymous message", f"> {discord.utils.escape_mentions(message)}")
-    e.set_footer(text=f"Sent anonymously • Only {member.display_name} can reply")
+    e = base("📨  Anonymous message",
+             f"> {discord.utils.escape_mentions(message)}\n-# Sent anonymously · only {member.display_name} can reply")
     view = discord.ui.View(timeout=None)
     view.add_item(NGLReply(member.id))
     try:
@@ -914,6 +920,7 @@ async def do_purchase(i: discord.Interaction, item) -> tuple[bool, str]:
         with db:  # refund
             db.execute("UPDATE users SET cookies = cookies + ? WHERE guild_id=? AND user_id=?", (price, gid, uid))
         return False, "I couldn't give you that role. You were not charged."
+    await send_log(i.guild, "🛍️  Role purchased", f"{i.user.mention} bought {role.mention} for 🍪 **{price:,}**", i.user)
     return True, f"You got {role.mention}! 🎭"
 
 
@@ -1046,6 +1053,7 @@ async def create_ticket(i: discord.Interaction, kind: str, answers: list):
     with db:
         db.execute("INSERT INTO tickets(channel_id, guild_id, user_id, created, kind) VALUES(?, ?, ?, ?, ?)",
                    (ch.id, g.id, i.user.id, int(time.time()), kind))
+    await send_log(g, "🎫  Ticket opened", f"{i.user.mention} opened a **{label}** ticket: {ch.mention}", i.user)
     e = base(f"{emoji}  {label} ticket",
              f"Hi {i.user.mention}, thanks for reaching out! {staff.mention} will be with you soon.\n"
              "-# Staff can press **Claim** to take this ticket.")
@@ -1062,8 +1070,10 @@ async def close_ticket(i: discord.Interaction):
         return await fail(i, "This isn't a ticket channel.")
     if i.user.id != row["user_id"] and not is_staff(i.user):
         return await fail(i, "Only the ticket owner or staff can close this.")
+    await send_log(i.guild, "🔒  Ticket closed", f"`#{i.channel.name}` closed by {i.user.mention}\nOpened by <@{row['user_id']}>", i.user)
     await i.response.send_message(embed=base(desc="🔒  Closing this ticket in 5 seconds…", footer=False))
     await asyncio.sleep(5)
+    ticket_closing.add(i.channel_id)
     with db:
         db.execute("DELETE FROM tickets WHERE channel_id=?", (i.channel_id,))
     try:
@@ -1122,6 +1132,7 @@ class TicketControlView(discord.ui.View):
         e = discord.Embed.from_dict(i.message.embeds[0].to_dict())
         e.add_field(name="🙋 Claimed by", value=i.user.mention, inline=False)
         await i.response.edit_message(embed=e, view=TicketControlView(claimed=True))
+        await send_log(i.guild, "🙋  Ticket claimed", f"{i.user.mention} claimed {i.channel.mention}", i.user)
         await i.channel.send(embed=base(desc=f"🙋  {i.user.mention} claimed this ticket and will help you now.",
                                         footer=False),
                              allowed_mentions=discord.AllowedMentions.none())
@@ -1135,6 +1146,10 @@ class TicketControlView(discord.ui.View):
 async def on_guild_channel_delete(ch):
     with db:
         db.execute("DELETE FROM tickets WHERE channel_id=?", (ch.id,))
+    if ch.id in ticket_closing:
+        ticket_closing.discard(ch.id)
+        return
+    await send_log(ch.guild, "🗑️  Channel deleted", f"`#{ch.name}`")
 
 
 ticket_group = app_commands.Group(name="ticket", description="Support tickets", guild_only=True)
@@ -1257,7 +1272,7 @@ def selfrole_embed(guild: discord.Guild) -> discord.Embed:
     for g in SELFROLES:
         lines = "\n".join(f"{emoji} <@&{rid}>" for rid, _, emoji, _ in g["roles"])
         e.add_field(name=g["title"], value=f"{lines}\n-# {g['note']}", inline=False)
-    e.set_footer(text="— Orage • Talk. Play. Create. Connect.",
+    e.set_footer(text="Orage",
                  icon_url=bot.user.display_avatar.url if bot.user else None)
     if guild.icon:
         e.set_thumbnail(url=guild.icon.url)
@@ -1290,6 +1305,291 @@ async def selfrole(i: discord.Interaction, channel: discord.TextChannel | None =
     await done(i, f"Self-role panel posted in {channel.mention}")
 
 
+# ---------- Logs, Double XP & daily challenges ----------
+ticket_closing: set = set()
+
+
+async def send_log(guild: discord.Guild, title: str, desc: str, user=None):
+    cid = get_channel_id(guild.id, "log")
+    ch = guild.get_channel(cid) if cid else None
+    if not ch:
+        return
+    e = base(title, desc)
+    e.timestamp = discord.utils.utcnow()
+    if user:
+        e.set_thumbnail(url=user.display_avatar.url)
+    try:
+        await ch.send(embed=e, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    roles = ", ".join(r.mention for r in member.roles[1:]) or "None"
+    await send_log(member.guild, "📤  Member left", f"{member.mention} · `{member}`\n**Roles:** {roles}", member)
+
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User):
+    await send_log(guild, "🔨  Member banned", f"{user.mention} · `{user}`", user)
+
+
+@bot.event
+async def on_member_unban(guild: discord.Guild, user: discord.User):
+    await send_log(guild, "🕊️  Member unbanned", f"{user.mention} · `{user}`", user)
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if after.bot:
+        return
+    added = [r.mention for r in after.roles if r not in before.roles]
+    removed = [r.mention for r in before.roles if r not in after.roles]
+    if added or removed:
+        lines = [after.mention]
+        if added:
+            lines.append("➕ " + " ".join(added))
+        if removed:
+            lines.append("➖ " + " ".join(removed))
+        await send_log(after.guild, "🎭  Roles updated", "\n".join(lines), after)
+    if before.nick != after.nick:
+        await send_log(after.guild, "✏️  Nickname changed",
+                       f"{after.mention}\n{before.nick or before.name} → {after.nick or after.name}", after)
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if not message.guild or message.author.bot:
+        return
+    desc = f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}"
+    if message.content:
+        desc += f"\n**Message:** {clean(message.content)[:900]}"
+    if message.attachments:
+        desc += f"\n**Attachments:** {len(message.attachments)}"
+    await send_log(message.guild, "🗑️  Message deleted", desc, message.author)
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot or before.channel == after.channel:
+        return
+    if before.channel is None:
+        desc = f"{member.mention} joined {after.channel.mention}"
+    elif after.channel is None:
+        desc = f"{member.mention} left {before.channel.mention}"
+    else:
+        desc = f"{member.mention} moved {before.channel.mention} → {after.channel.mention}"
+    await send_log(member.guild, "🔊  Voice", desc, member)
+
+
+@bot.event
+async def on_guild_channel_create(ch):
+    await send_log(ch.guild, "📁  Channel created", f"{ch.mention}")
+
+
+@bot.event
+async def on_guild_role_create(role: discord.Role):
+    await send_log(role.guild, "🎭  Role created", f"{role.mention} (`{role.name}`)")
+
+
+@bot.event
+async def on_guild_role_delete(role: discord.Role):
+    await send_log(role.guild, "🎭  Role deleted", f"`{role.name}`")
+
+
+@bot.tree.command(name="setlog", description="Pick the channel for all server logs")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Where logs go (leave empty to turn logs off)")
+async def setlog(i: discord.Interaction, channel: discord.TextChannel | None = None):
+    if channel is None:
+        with db:
+            set_channel_id(i.guild.id, "log", 0)
+        return await done(i, "Logs are now **off**.")
+    p = channel.permissions_for(i.guild.me)
+    if not (p.view_channel and p.send_messages and p.embed_links):
+        return await fail(i, f"I need *View Channel*, *Send Messages* and *Embed Links* in {channel.mention}.")
+    with db:
+        set_channel_id(i.guild.id, "log", channel.id)
+    await done(i, f"All logs will be posted in {channel.mention}")
+    await send_log(i.guild, "📜  Logging enabled", f"Set by {i.user.mention}", i.user)
+
+
+# ---------- Double XP (owner only) ----------
+def xp_mult(gid: int) -> int:
+    r = db.execute("SELECT until FROM xp_events WHERE guild_id=?", (gid,)).fetchone()
+    return 2 if r and r["until"] > time.time() else 1
+
+
+@bot.tree.command(name="doublexp", description="(Owner) Start or stop a Double XP event")
+@app_commands.guild_only()
+@app_commands.describe(duration="How long, like 1h, 2h30m or 1d. Type off to stop.")
+async def doublexp(i: discord.Interaction, duration: str):
+    if i.user.id != OWNER_ID:
+        return await fail(i, "Only the bot owner can use this command.")
+    if duration.strip().lower() in ("off", "stop", "end"):
+        with db:
+            db.execute("DELETE FROM xp_events WHERE guild_id=?", (i.guild.id,))
+        await i.response.send_message(embed=base("⚡  Double XP ended", "XP is back to normal."))
+        return await send_log(i.guild, "⚡  Double XP ended", f"Stopped by {i.user.mention}", i.user)
+    secs = parse_duration(duration)
+    if not secs or secs < 60 or secs > 7 * 86400:
+        return await fail(i, "Pick a time between 1 minute and 7 days, like `1h`, `2h30m` or `1d`. Or type `off`.")
+    until = int(time.time()) + secs
+    with db:
+        db.execute("INSERT INTO xp_events VALUES(?, ?) ON CONFLICT(guild_id) DO UPDATE SET until=excluded.until",
+                   (i.guild.id, until))
+    await i.response.send_message(embed=base("⚡  Double XP is on!",
+                                             f"All XP is **doubled** until <t:{until}:R>.\nKeep chatting! 💬"))
+    await send_log(i.guild, "⚡  Double XP started", f"By {i.user.mention} · ends <t:{until}:R>", i.user)
+
+
+# ---------- Daily challenges ----------
+CHALLENGES = [
+    'Share a photo of your favorite item you own.',
+    'Show us something orange near you.',
+    'Post a photo of the view from your window.',
+    "What's your favorite snack or drink? Show it.",
+    'Draw anything in two minutes and share it.',
+    'Share a photo of your pet or your favorite animal.',
+    "Name the song you can't stop replaying this week.",
+    'Show your desk or study corner.',
+    'Take a photo of the sky right now.',
+    'Share a screenshot of your best game moment.',
+    'Post something handmade, by you or anyone.',
+    'Show the coolest thing in your room.',
+    'Share the cover of a book, comic, or manga you love.',
+    "Post the best meal you've ever eaten.",
+    'Show us something green.',
+    'Describe your day in exactly five words.',
+    'Share a photo of your favorite pair of shoes.',
+    'Pick your favorite emoji and explain why.',
+    'Post a photo of a plant, flower, or tree.',
+    'Show something that makes you smile.',
+    'Share your go-to comfort food.',
+    'Post a photo of your favorite mug, cup, or bottle.',
+    "What's a small thing that made your day better lately?",
+    'Show your wallpaper and tell us why you picked it.',
+    'Share a doodle of your favorite animal.',
+    'Post a photo of something blue.',
+    "What's the best movie or series you watched recently?",
+    'Show us your favorite place to relax at home.',
+    'Share a quote you live by.',
+    'Post a photo of your favorite hoodie, jacket, or cap.',
+    'Tell us your hidden talent.',
+    'Show a photo of something old that you still love.',
+    'Share your favorite game character and why.',
+    "Show what's in your backpack or bag.",
+    'Draw your mood today using only three colors.',
+    'Share your favorite place to eat.',
+    'Post a photo of your morning.',
+    'What song makes you feel unstoppable?',
+    'Show us a collection you have, big or small.',
+    'Share a photo of your favorite keyboard, controller, or gadget.',
+    'Post something yellow.',
+    'Tell us two truths and one lie about yourself.',
+    'Show your favorite sticker, poster, or keychain.',
+    "What's the most useful app on your phone? Why?",
+    'Share a photo of a cloud that looks like something.',
+    'Post your favorite dessert.',
+    'Show us the best thing you found at home today.',
+    "What's your dream trip? Share a picture of it.",
+    'Share a photo of your favorite pen, notebook, or tool.',
+    'Describe your perfect weekend in one sentence.',
+    'Post a photo of your lunch or dinner today.',
+    'Show us something red.',
+    "What's the best advice anyone has given you?",
+    'Share your favorite memory from this server.',
+    'Post a photo of something tiny and cute.',
+    'Show us how you take your coffee, tea, or favorite drink.',
+    'Which game have you played the most? Show a screenshot.',
+    'Share a photo of a candle, lamp, or cozy light.',
+    'Draw a cat in 60 seconds.',
+    'Post a photo of your favorite corner of the world.',
+    'Show something you made in the kitchen.',
+    'Share a song that reminds you of summer.',
+    'Show us the shoes by your door.',
+    'Tell us your favorite word and what it means to you.',
+    'Post a photo of something shiny.',
+    "What's your favorite thing to do on a rainy day?",
+    "Share the best gift you've ever received.",
+    'Show us your favorite fruit.',
+    'Post a photo of a street, path, or road you like.',
+    'Share a movie quote you know by heart.',
+    'Show us something purple.',
+    "What's one skill you want to learn this year?",
+    'Share a photo of your favorite toy, plushie, or figure.',
+    'Describe your dream room or setup.',
+    'Post a picture of the night sky or city lights.',
+    "What's the funniest thing that happened to you this month?",
+    'Show your favorite food from your hometown.',
+    'Share your top three songs right now.',
+    'Post a photo of a sunrise or sunset.',
+    'Show us something that is older than you.',
+    "What's your favorite childhood game?",
+    'Draw yourself as an animal.',
+    'Share a photo of something that looks like a face.',
+    'Show us your favorite tree or park.',
+    'Tell us about a time you were really proud of yourself.',
+    'Describe a song that stuck with you, in your own words.',
+    'Show us something black and white.',
+    "What's the first thing you do after waking up?",
+    'Share your favorite drink for a hot day.',
+    "Post a photo of something you're grateful for today.",
+    'Which fictional place would you live in? Why?',
+    'Show us an interesting shadow you found.',
+    'Share your all-time favorite snack combo.',
+    'Post a photo of your headphones, speaker, or instrument.',
+    "Tell us what you'd do with a totally free day.",
+    'Show the best thing you ate this week.',
+    "Draw the logo of a server you'd start.",
+    'Share a kind message that made you feel appreciated.',
+    'Post something that looks like a smile.',
+    "What's one thing you want the whole server to try today?",
+]
+
+
+def challenge_embed(day: int, channel_id: int = 0) -> discord.Embed:
+    n = day % len(CHALLENGES)
+    where = f"Share it in <#{channel_id}>" if channel_id else "Share it in the chat"
+    e = base("📸  Daily Challenge", f"-# Challenge {n + 1} of {len(CHALLENGES)}\n\n**{CHALLENGES[n]}**\n\n{where}")
+    e.add_field(name="⏰ Next challenge", value=f"<t:{next_day_ts()}:R>", inline=False)
+    return e
+
+
+@bot.tree.command(name="challenge", description="See today's daily challenge")
+async def challenge(i: discord.Interaction):
+    cid = get_channel_id(i.guild.id, "challenge") if i.guild else 0
+    await i.response.send_message(embed=challenge_embed(today(), cid))
+
+
+@tasks.loop(minutes=1)
+async def challenge_loop():
+    d = today()
+    for r in db.execute("SELECT guild_id, channel_id FROM channels WHERE kind='challenge'").fetchall():
+        last = db.execute("SELECT last_day FROM challenge_posts WHERE guild_id=?", (r["guild_id"],)).fetchone()
+        if last and last["last_day"] == d:
+            continue
+        guild = bot.get_guild(r["guild_id"])
+        ch = guild.get_channel(r["channel_id"]) if guild else None
+        if not ch:
+            continue
+        try:
+            await ch.send(embed=challenge_embed(d, ch.id))
+        except discord.HTTPException:
+            continue
+        with db:
+            db.execute("INSERT INTO challenge_posts VALUES(?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+                       "last_day=excluded.last_day", (r["guild_id"], d))
+
+
+@challenge_loop.before_loop
+async def before_challenge_loop():
+    await bot.wait_until_ready()
+
+
 # ---------- Admin: setup ----------
 ADMIN = dict(guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
 perm = app_commands.checks.has_permissions(manage_guild=True)
@@ -1299,7 +1599,8 @@ levelrole_group = app_commands.Group(name="levelrole", description="Roles unlock
 
 FEATURES = [app_commands.Choice(name="Welcome messages", value="welcome"),
             app_commands.Choice(name="Level-up announcements", value="levelup"),
-            app_commands.Choice(name="Streak announcements", value="streak")]
+            app_commands.Choice(name="Streak announcements", value="streak"),
+            app_commands.Choice(name="Daily challenge", value="challenge")]
 FEATURE_NAMES = {c.value: c.name for c in FEATURES}
 
 
@@ -1321,8 +1622,9 @@ async def channel_set(i: discord.Interaction, feature: app_commands.Choice[str],
 async def channel_clear(i: discord.Interaction, feature: app_commands.Choice[str]):
     with db:
         set_channel_id(i.guild.id, feature.value, 0)
-    extra = "Welcome messages are now **off**." if feature.value == "welcome" \
-        else f"**{feature.name}** will post in the channel where the member chatted."
+    extra = {"welcome": "Welcome messages are now **off**.",
+             "challenge": "Daily challenges will no longer be posted automatically."}.get(
+        feature.value, f"**{feature.name}** will post in the channel where the member chatted.")
     await done(i, extra)
 
 
@@ -1460,6 +1762,8 @@ async def settings(i: discord.Interaction):
     e.add_field(name="👋 Welcome", value=chan("welcome", "Off · use `/channel set`"), inline=True)
     e.add_field(name="⬆️ Level-ups", value=chan("levelup", "Where members chat"), inline=True)
     e.add_field(name="🔥 Streaks", value=chan("streak", "Where members chat"), inline=True)
+    e.add_field(name="📜 Logs", value=chan("log", "Off · use `/setlog`"), inline=True)
+    e.add_field(name="📸 Challenge", value=chan("challenge", "Off · use `/channel set`"), inline=True)
     e.add_field(name="🎭 Autorole", value=role.mention if role else "Off", inline=True)
     e.add_field(name="🎖️ Level rewards", value=f"{n_rewards} set", inline=True)
     e.add_field(name="🕛 Day resets", value=f"Midnight UTC{TZ_OFFSET:+g}", inline=True)
